@@ -310,11 +310,12 @@ class RenderPipeline:
                             logger.info(f"Job {job_id}: 🚫 Old compositing SKIPPED - everything through LLM")
                             
                             refined_result = self.refiner.refine_compositing(
-                                None,  # Нет старого композитинга - только LLM
-                                ai_prompt,  # Промпт из конфигурации шаблона
+                                composed_image=None,  # Нет старого композитинга - только LLM
+                                template_description=template_desc,
                                 detected_issues=[],
-                                original_dog_image=image,  # Исходное фото собаки - ОБЯЗАТЕЛЬНО
+                                original_dog_image=image,  # Исходное фото сущности - ОБЯЗАТЕЛЬНО
                                 poster_background=poster_background,  # Чистый постер - ОБЯЗАТЕЛЬНО
+                                ai_prompt=ai_prompt,  # Промпт из конфигурации шаблона
                             )
                             
                             # ВСЕГДА используем результат AI если он получен
@@ -327,38 +328,90 @@ class RenderPipeline:
                                 raise CompositingError("LLM integration returned None - cannot proceed without AI result")
                                 
                         except CompositingError as e:
-                            # Если полная интеграция не удалась - пробуем альтернативный подход через LLM
-                            logger.warning(f"Job {job_id}: Full LLM integration failed ({e}), trying alternative LLM approach")
-                            try:
-                                # Создаём временный простой композит ТОЛЬКО для LLM улучшения (не для финального результата)
-                                from app.services.compositing.compositor import Compositor
-                                temp_compositor = Compositor(template_config)
-                                temp_composite = temp_compositor.compose(subject_rgba, placement)
+                            # Проверяем, не заблокирован ли запрос фильтром безопасности
+                            error_str = str(e).lower()
+                            if "safety filter" in error_str or "nsfw" in error_str:
+                                logger.error(f"Job {job_id}: ❌ KIE.ai blocked by safety filter (nsfw)")
+                                logger.error(f"Job {job_id}: Error: {e}")
+                                logger.warning(f"Job {job_id}: ⚠️ Switching to non-LLM fallback (local compositing)")
                                 
-                                if debug:
-                                    storage.save_debug(temp_composite, "04_temp_composite_for_llm.png")
-                                
-                                # Для fallback используем промпт из конфига, если он есть
-                                fallback_prompt = ai_prompt if ai_prompt else (
-                                    "Improve the image. Ensure perfect color matching, "
-                                    "natural shadows, and seamless integration. "
-                                    "The result should be publication-ready."
-                                )
-                                refined_result = self.refiner.refine_compositing(
-                                    temp_composite,  # Временный композит для LLM улучшения
-                                    fallback_prompt,  # Промпт из конфига или базовый для fallback
-                                    detected_issues=[],
-                                    original_dog_image=None,  # Не используем исходное фото
-                                    poster_background=None,  # Не используем чистый постер
-                                )
-                                if refined_result:
-                                    final_image = refined_result
-                                    logger.info(f"Job {job_id}: ✅ Alternative LLM approach successful")
-                                else:
-                                    raise CompositingError("Alternative LLM approach also returned None")
-                            except Exception as e2:
-                                logger.error(f"Job {job_id}: ❌ All LLM approaches failed: {e2}")
-                                raise CompositingError(f"LLM integration completely failed: {e2}") from e2
+                                # Используем локальный композитинг как fallback
+                                try:
+                                    from app.services.compositing.compositor import Compositor
+                                    logger.info(f"Job {job_id}: Using local compositing as fallback (no AI)")
+                                    compositor = Compositor(template_config)
+                                    final_image = compositor.compose(subject_rgba, placement)
+                                    
+                                    # Применяем post-AI слои (occlusion_mask, glass_fx)
+                                    final_image = self._apply_post_ai_layers(
+                                        final_image, template_config, debug, storage, job_id
+                                    )
+                                    
+                                    # Помечаем в метаданных, что LLM был заблокирован
+                                    metadata["refinement"] = {
+                                        "applied": False,
+                                        "blocked_by_safety": True,
+                                        "reason": "nsfw",
+                                        "fallback": "local_compositing",
+                                        "message": "KIE.ai blocked by safety filter, using local compositing",
+                                    }
+                                    
+                                    logger.warning(f"Job {job_id}: ✅ Fallback compositing completed (no AI)")
+                                    logger.warning(f"Job {job_id}: ⚠️ Result quality may be lower without AI refinement")
+                                    
+                                    # Продолжаем выполнение (не прерываем пайплайн)
+                                    # final_image уже установлен, переходим к quality gate
+                                    
+                                except Exception as fallback_error:
+                                    logger.error(f"Job {job_id}: ❌ Fallback compositing also failed: {fallback_error}")
+                                    raise CompositingError(
+                                        "KIE.ai blocked the task with safety filter (nsfw). "
+                                        "Try a different input image, a more neutral crop, or use non-LLM fallback. "
+                                        f"Fallback compositing also failed: {fallback_error}"
+                                    ) from fallback_error
+                            
+                            # Если полная интеграция не удалась по другой причине - пробуем альтернативный подход через LLM
+                            else:
+                                logger.warning(f"Job {job_id}: Full LLM integration failed ({e}), trying alternative LLM approach")
+                                logger.warning(f"Job {job_id}: ⚠️ Fallback mode: using temp composite (may have lower quality)")
+                                try:
+                                    # Создаём временный простой композит ТОЛЬКО для LLM улучшения (не для финального результата)
+                                    from app.services.compositing.compositor import Compositor
+                                    temp_compositor = Compositor(template_config)
+                                    temp_composite = temp_compositor.compose(subject_rgba, placement)
+                                    
+                                    if debug:
+                                        storage.save_debug(temp_composite, "04_temp_composite_for_llm.png")
+                                        logger.warning(f"Job {job_id}: ⚠️ Saved temp composite - this is a fallback, quality may be lower")
+                                    
+                                    # Для fallback используем смягчённый промпт
+                                    fallback_prompt = (
+                                        f"{ai_prompt} "
+                                        "Сохрани узнаваемые черты внешности из исходного загруженного фото. "
+                                        "Ориентируйся на внешность человека из загруженного изображения. "
+                                        "Сделай человека похожим на фото-референс."
+                                    ) if ai_prompt else (
+                                        "Improve the image. Ensure perfect color matching, "
+                                        "natural shadows, and seamless integration. "
+                                        "Preserve recognizable features from the uploaded photo. "
+                                        "The result should be publication-ready."
+                                    )
+                                    refined_result = self.refiner.refine_compositing(
+                                        composed_image=temp_composite,  # Временный композит для LLM улучшения
+                                        template_description=template_desc,
+                                        detected_issues=[],
+                                        original_dog_image=image,  # Передаём исходное фото для контекста
+                                        poster_background=poster_background,  # Передаём постер для контекста
+                                        ai_prompt=fallback_prompt,  # Улучшенный промпт с акцентом на сохранение лица
+                                    )
+                                    if refined_result:
+                                        final_image = refined_result
+                                        logger.info(f"Job {job_id}: ✅ Alternative LLM approach successful")
+                                    else:
+                                        raise CompositingError("Alternative LLM approach also returned None")
+                                except Exception as e2:
+                                    logger.error(f"Job {job_id}: ❌ All LLM approaches failed: {e2}")
+                                    raise CompositingError(f"LLM integration completely failed: {e2}") from e2
                         
                         # Проверяем что у нас есть финальное изображение
                         if final_image is None:

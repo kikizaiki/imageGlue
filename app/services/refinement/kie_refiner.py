@@ -490,8 +490,32 @@ class KIERefiner:
                     return data
                 
                 if state in {"fail", "failed", "error"}:
-                    error_msg = data.get("msg") or data.get("error") or data.get("message", "Unknown error")
-                    raise CompositingError(f"KIE.ai task failed: {error_msg}")
+                    # Извлекаем детальную информацию об ошибке
+                    fail_msg = (data.get("failMsg") or "").strip()
+                    fail_code = str(data.get("failCode") or "").strip()
+                    error_msg = data.get("message") or data.get("error") or data.get("msg") or ""
+                    
+                    # Формируем детальное сообщение об ошибке
+                    error_details = []
+                    if fail_code:
+                        error_details.append(f"failCode={fail_code}")
+                    if fail_msg:
+                        error_details.append(f"failMsg={fail_msg}")
+                    if error_msg:
+                        error_details.append(f"message={error_msg}")
+                    
+                    full_error_msg = ", ".join(error_details) if error_details else "Unknown error"
+                    
+                    # Специальная обработка для nsfw ошибки
+                    if fail_msg.lower() == "nsfw" or "nsfw" in fail_msg.lower():
+                        logger.warning(f"⚠️ KIE.ai task {task_id} blocked by safety filter (NSFW)")
+                        logger.warning(f"⚠️ Blocked by safety filter - switching to fallback mode")
+                        raise CompositingError(
+                            f"KIE.ai blocked the task with safety filter (nsfw): {full_error_msg}. "
+                            "Try a different input image, a more neutral crop, or use non-LLM fallback."
+                        )
+                    
+                    raise CompositingError(f"KIE.ai task {task_id} failed: {full_error_msg}")
                 
                 # Если state не success и не fail, продолжаем ждать
                 logger.debug(f"Task {task_id} state: {state}, waiting...")
@@ -610,11 +634,12 @@ class KIERefiner:
 
     def refine_compositing(
         self,
-        composed_image: Image.Image | None,
-        ai_prompt: str,
+        composed_image: Image.Image | None = None,
+        template_description: str = "poster",
         detected_issues: list[str] | None = None,
         original_dog_image: Image.Image | None = None,
         poster_background: Image.Image | None = None,
+        ai_prompt: str | None = None,
     ) -> Image.Image:
         """
         Integrate dog into poster using AI/LLM.
@@ -674,10 +699,10 @@ class KIERefiner:
         ai_prompt: str,
     ) -> Image.Image:
         """
-        Use AI to integrate dog into poster from scratch using GPT Image 1.5.
+        Use AI to integrate entity (dog/human) into poster from scratch using GPT Image 1.5.
 
         Args:
-            dog_image: Original dog photo
+            dog_image: Original entity photo (dog or human)
             poster_background: Clean poster background
             ai_prompt: AI integration prompt from template config
 
@@ -689,13 +714,17 @@ class KIERefiner:
             prompt = ai_prompt
             
             logger.info("Step 1: Uploading entity image for AI integration...")
-            dog_file_url = self._upload_file(dog_image)
+            logger.info(f"Entity image size: {dog_image.size}")
+            entity_file_url = self._upload_file(dog_image)
             
             logger.info("Step 2: Uploading poster background...")
+            logger.info(f"Poster background size: {poster_background.size}")
             poster_file_url = self._upload_file(poster_background)
             
             # Для GPT Image 1.5 можно использовать несколько input_urls
             logger.info("Step 3: Creating integration task with both images...")
+            logger.info(f"Image order: [1] poster ({poster_file_url[:50]}...), [2] entity ({entity_file_url[:50]}...)")
+            logger.info(f"Prompt length: {len(prompt)} chars")
             
             # Правильный формат payload согласно документации KIE.ai
             # input_urls и prompt должны быть внутри объекта input
@@ -706,13 +735,14 @@ class KIERefiner:
             aspect_ratio_str = self._calculate_aspect_ratio(poster_width, poster_height)
             
             # Определяем порядок изображений: постер первым, затем сущность (собака/человек)
+            # ВАЖНО: Первое изображение - постер, второе - загруженное фото сущности
             payload = {
                 "model": "gpt-image/1.5-image-to-image",  # Правильное имя модели для image-to-image
                 "input": {
-                    "input_urls": [poster_file_url, dog_file_url],  # Постер как основа, сущность для интеграции
+                    "input_urls": [poster_file_url, entity_file_url],  # [0] = постер, [1] = загруженное фото
                     "prompt": prompt,
                     "aspect_ratio": aspect_ratio_str,  # Используем aspect_ratio исходного постера
-                    "quality": "medium",  # Опционально
+                    "quality": "high",  # Увеличиваем качество для лучшего сохранения деталей лица
                 },
             }
             
