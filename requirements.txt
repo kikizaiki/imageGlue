@@ -1,0 +1,21 @@
+# Core
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Image processing
+Pillow==10.1.0
+opencv-python==4.8.1.78
+numpy<2.0
+
+# ML/AI
+ultralytics==8.0.196
+rembg[new]==2.0.50
+
+# HTTP client
+httpx==0.25.2
+
+# Development
+pytest==7.4.3

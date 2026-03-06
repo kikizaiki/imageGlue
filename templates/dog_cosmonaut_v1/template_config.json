@@ -1,0 +1,46 @@
+{
+  "template_id": "dog_cosmonaut_v1",
+  "canvas": {
+    "width": 1024,
+    "height": 1536
+  },
+  "assets": {
+    "base_clean": "base_clean.png",
+    "occlusion_mask": "occlusion_mask.png",
+    "glass_fx": "glass_fx.png"
+  },
+  "placement": {
+    "insert_zone": {
+      "x": 210,
+      "y": 170,
+      "width": 610,
+      "height": 610
+    },
+    "fit_mode": "contain",
+    "padding": {
+      "left": 0.06,
+      "right": 0.06,
+      "top": 0.08,
+      "bottom": 0.04
+    },
+    "crop_expansion": {
+      "left": 0.18,
+      "right": 0.18,
+      "top": 0.28,
+      "bottom": 0.20
+    },
+    "allow_ears_outside_mask": true,
+    "vertical_bias": -0.02,
+    "horizontal_bias": 0.0,
+    "scale_multiplier": 1.0,
+    "min_scale": 0.7,
+    "max_scale": 2.2
+  },
+  "postprocess": {
+    "edge_feather": 2,
+    "light_wrap": 0.12,
+    "glass_tint": 0.08,
+    "grain_match": false,
+    "color_match": true
+  }
+}

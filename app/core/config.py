@@ -1,0 +1,61 @@
+"""Application configuration."""
+from pathlib import Path
+from typing import Literal
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application settings."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # Application
+    APP_ENV: str = "development"
+    DEBUG: bool = True
+
+    # Paths
+    PROJECT_ROOT: Path = Path(__file__).parent.parent.parent
+    TEMPLATES_ROOT: Path = PROJECT_ROOT / "templates"
+    RUNS_ROOT: Path = PROJECT_ROOT / "runs"
+    DEBUG_ROOT: Path = RUNS_ROOT / "debug"
+    OUTPUT_ROOT: Path = RUNS_ROOT / "output"
+
+    # Input validation
+    MIN_IMAGE_WIDTH: int = 200
+    MIN_IMAGE_HEIGHT: int = 200
+    MAX_IMAGE_SIZE_MB: int = 10
+    ALLOWED_FORMATS: set[str] = {".jpg", ".jpeg", ".png", ".webp"}
+
+    # Detection
+    DETECTION_CONFIDENCE_THRESHOLD: float = 0.3
+    MIN_DOG_AREA_RATIO: float = 0.05  # Минимальная доля площади кадра, занимаемая собакой
+
+    # Segmentation
+    SEGMENTATION_BACKEND: Literal["rembg", "kie"] = "rembg"
+    REMBG_MODEL: str = "u2net"
+
+    # AI Refinement
+    KIE_API_KEY: str = ""
+    KIE_API_URL: str = "https://api.kie.ai/v1"
+    REFINEMENT_ENABLED: bool = True
+    REFINEMENT_THRESHOLD: float = 0.6  # Порог качества для запуска refinement
+
+    # Quality gate
+    QUALITY_CHECK_ENABLED: bool = True
+    MIN_HEAD_SIZE_RATIO: float = 0.02  # Минимальный размер головы относительно кадра
+    MAX_BLUR_THRESHOLD: float = 100.0  # Порог размытия (Laplacian variance)
+
+    def __init__(self, **kwargs):
+        """Initialize settings and create directories."""
+        super().__init__(**kwargs)
+        self.DEBUG_ROOT.mkdir(parents=True, exist_ok=True)
+        self.OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+settings = Settings()
