@@ -611,7 +611,7 @@ class KIERefiner:
     def refine_compositing(
         self,
         composed_image: Image.Image | None,
-        template_description: str = "astronaut poster",
+        ai_prompt: str,
         detected_issues: list[str] | None = None,
         original_dog_image: Image.Image | None = None,
         poster_background: Image.Image | None = None,
@@ -621,7 +621,7 @@ class KIERefiner:
 
         Args:
             composed_image: Composed image (optional, only used as fallback if original_dog_image not provided)
-            template_description: Description of template for better prompts
+            ai_prompt: AI integration prompt from template config
             detected_issues: List of detected quality issues
             original_dog_image: Original dog photo (REQUIRED for full LLM integration)
             poster_background: Clean poster background (REQUIRED for full LLM integration)
@@ -638,35 +638,40 @@ class KIERefiner:
         # ПРИОРИТЕТ: Если есть исходное фото собаки и постер - используем их для полной LLM интеграции
         if original_dog_image and poster_background:
             logger.info("🎨 Using original dog photo and poster for FULL LLM integration (no old compositing)")
+            # Промпт должен быть передан из template_config
+            if not ai_prompt or not isinstance(ai_prompt, str) or not ai_prompt.strip():
+                raise CompositingError("AI integration prompt is required but not provided in template config")
             return self._integrate_dog_into_poster(
-                original_dog_image, poster_background, template_description
+                original_dog_image, poster_background, ai_prompt
             )
 
         # Fallback: улучшаем уже скомпозированное изображение (когда полная интеграция не работает)
-        prompt = (
-            f"Замени на данном постере текущую собаку на новую. Обтрави собаку или сделай максимально похожую вместо текущей и замени на текущем постере. "
-            "Критические улучшения: "
-            "1. Удали все видимые края, швы и артефакты обтравки вокруг собаки "
-            "2. Сопоставь направление и интенсивность освещения с окружением постера "
-            "3. Настрой тени чтобы соответствовать источникам света постера и создать глубину "
-            "4. Смешай цвета так, чтобы шерсть собаки естественно соответствовала цветовой палитре постера "
-            "5. Убедись что собака выглядит внутри шлема космонавта, а не поверх него "
-            "6. Добавь реалистичные отражения и блики, соответствующие материалу шлема "
-            "7. Смягчи и смешай все края бесшовно "
-            "8. Настрой перспективу и масштаб чтобы выглядело естественно "
-            "9. Финальный результат должен выглядеть как единый профессионально созданный постер "
-            "10. Не должно быть видно признаков композитинга, вырезания или вставки. "
-            "Сделай так, чтобы выглядело как будто профессиональный дизайнер создал это изображение с нуля."
-        )
+        # Используем промпт из конфига, если он передан, иначе базовый промпт
+        if not ai_prompt or not ai_prompt.strip():
+            # Базовый промпт для fallback (если промпт не передан)
+            prompt = (
+                "Улучши интеграцию объекта в изображение. "
+                "Удали все видимые края, швы и артефакты обтравки. "
+                "Сопоставь направление и интенсивность освещения с окружением. "
+                "Настрой тени чтобы соответствовать источникам света и создать глубину. "
+                "Смешай цвета для естественного соответствия цветовой палитре. "
+                "Смягчи и смешай все края бесшовно. "
+                "Настрой перспективу и масштаб чтобы выглядело естественно. "
+                "Финальный результат должен выглядеть как единый профессионально созданный постер. "
+                "Не должно быть видно признаков композитинга, вырезания или вставки."
+            )
+        else:
+            # Используем промпт из конфига
+            prompt = ai_prompt
         
-        logger.info(f"Using AI prompt for refinement: {prompt[:100]}...")
+        logger.info(f"Using AI prompt for refinement (fallback): {prompt[:100]}...")
         return self._refine_with_prompt(composed_image, prompt)
 
     def _integrate_dog_into_poster(
         self,
         dog_image: Image.Image,
         poster_background: Image.Image,
-        template_description: str = "astronaut poster",
+        ai_prompt: str,
     ) -> Image.Image:
         """
         Use AI to integrate dog into poster from scratch using GPT Image 1.5.
@@ -674,30 +679,16 @@ class KIERefiner:
         Args:
             dog_image: Original dog photo
             poster_background: Clean poster background
-            template_description: Description of template
+            ai_prompt: AI integration prompt from template config
 
         Returns:
             Integrated image
         """
         try:
-            # Промпт для замены собаки на постере (на основе запроса пользователя)
-            prompt = (
-                f"Замени на данном постере (первое изображение) текущую собаку на мою загруженную собаку (второе изображение). "
-                f"Обтрави собаку из второго изображения или сделай максимально похожую вместо текущей и замени на текущем постере. "
-                "Требования: "
-                "1. Найди и удали текущую собаку на постере "
-                "2. Обтрави (вырежи) новую собаку из второго изображения - голову, уши, шею, верхнюю часть груди "
-                "3. Замени текущую собаку на новую, разместив её в том же месте (внутри шлема космонавта) "
-                "4. Собака должна выглядеть как будто она изначально была на этом постере, а не вставлена поверх "
-                "5. Сопоставь освещение, тени и цвета с окружением постера "
-                "6. Убедись что голова, уши и верхняя часть тела собаки хорошо видны внутри шлема "
-                "7. Убери все видимые края, швы и артефакты от обтравки "
-                "8. Результат должен выглядеть как профессионально созданный постер без признаков склейки "
-                "9. Сохрани узнаваемые черты и выражение моей собаки "
-                "10. Финальное изображение должно выглядеть как единое целое, созданное дизайнером."
-            )
+            # Используем промпт из конфигурации шаблона
+            prompt = ai_prompt
             
-            logger.info("Step 1: Uploading dog image for AI integration...")
+            logger.info("Step 1: Uploading entity image for AI integration...")
             dog_file_url = self._upload_file(dog_image)
             
             logger.info("Step 2: Uploading poster background...")
@@ -714,10 +705,11 @@ class KIERefiner:
             # Упрощаем aspect_ratio до ближайшего стандартного значения
             aspect_ratio_str = self._calculate_aspect_ratio(poster_width, poster_height)
             
+            # Определяем порядок изображений: постер первым, затем сущность (собака/человек)
             payload = {
                 "model": "gpt-image/1.5-image-to-image",  # Правильное имя модели для image-to-image
                 "input": {
-                    "input_urls": [poster_file_url, dog_file_url],  # Постер как основа, собака для интеграции
+                    "input_urls": [poster_file_url, dog_file_url],  # Постер как основа, сущность для интеграции
                     "prompt": prompt,
                     "aspect_ratio": aspect_ratio_str,  # Используем aspect_ratio исходного постера
                     "quality": "medium",  # Опционально
@@ -788,8 +780,8 @@ class KIERefiner:
             result_image = self._download_image_from_url(result_url)
             
             # Используем результат от KIE.ai как есть - без кропов, без изменения размера
-            # KIE.ai должен вернуть постер с обновлённой собакой того же размера
-            logger.info(f"✅ Dog integrated into poster using AI. Result size: {result_image.size}")
+            # KIE.ai должен вернуть постер с обновлённой сущностью того же размера
+            logger.info(f"✅ Entity integrated into poster using AI. Result size: {result_image.size}")
             return result_image
             
         except Exception as e:

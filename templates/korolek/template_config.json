@@ -1,8 +1,9 @@
 {
-  "template_id": "dog_cosmonaut_v1",
+  "template_id": "korolek",
+  "entity_type": "human",
   "canvas": {
-    "width": 1024,
-    "height": 1536
+    "width": 1400,
+    "height": 2000
   },
   "assets": {
     "base_clean": "base_clean.png",
@@ -11,30 +12,30 @@
   },
   "placement": {
     "insert_zone": {
-      "x": 210,
-      "y": 170,
-      "width": 610,
-      "height": 610
+      "x": 0,
+      "y": 0,
+      "width": 1400,
+      "height": 2000
     },
     "fit_mode": "contain",
     "padding": {
-      "left": 0.06,
-      "right": 0.06,
-      "top": 0.08,
-      "bottom": 0.04
+      "left": 0.05,
+      "right": 0.05,
+      "top": 0.05,
+      "bottom": 0.05
     },
     "crop_expansion": {
-      "left": 0.18,
-      "right": 0.18,
-      "top": 0.28,
-      "bottom": 0.20
+      "left": 0.15,
+      "right": 0.15,
+      "top": 0.15,
+      "bottom": 0.40
     },
-    "allow_ears_outside_mask": true,
-    "vertical_bias": -0.02,
+    "allow_ears_outside_mask": false,
+    "vertical_bias": 0.0,
     "horizontal_bias": 0.0,
     "scale_multiplier": 1.0,
-    "min_scale": 0.7,
-    "max_scale": 2.2
+    "min_scale": 0.5,
+    "max_scale": 2.0
   },
   "postprocess": {
     "edge_feather": 2,
@@ -47,7 +48,9 @@
     "enabled": true,
     "improve_segmentation": true,
     "improve_placement": false,
-    "second_pass": true,
-    "prompt_template": "Make the dog blend seamlessly into the astronaut poster. Fix edges, lighting, and color matching."
+    "second_pass": false
+  },
+  "ai_integration": {
+    "prompt": "Замени на данном постере (первое изображение) текущего человека на моего загруженного человека (второе изображение). Обтрави человека из второго изображения или сделай максимально похожего вместо текущего и замени на текущем постере. Требования: 1. Найди и удали текущего человека на постере 2. Обтрави (вырежи) нового человека из второго изображения - голову, лицо, шею, верхнюю часть тела 3. Замени текущего человека на нового, разместив его в том же месте 4. Человек должен выглядеть как будто он изначально был на этом постере, а не вставлен поверх 5. Сопоставь освещение, тени и цвета с окружением постера 6. Убедись что голова, лицо и верхняя часть тела человека хорошо видны 7. Убери все видимые края, швы и артефакты от обтравки 8. Результат должен выглядеть как профессионально созданный постер без признаков склейки 9. Сохрани узнаваемые черты и выражение лица человека 10. Финальное изображение должно выглядеть как единое целое, созданное дизайнером."
   }
 }

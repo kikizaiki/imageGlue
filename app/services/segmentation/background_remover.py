@@ -85,6 +85,8 @@ class BackgroundRemover:
     def _remove_background_fallback(self, image: Image.Image) -> Image.Image:
         """
         Fallback background removal using OpenCV grabcut.
+        
+        Optimized for large images: resizes before processing, then scales back.
 
         Args:
             image: PIL Image
@@ -96,8 +98,21 @@ class BackgroundRemover:
             import cv2
 
             # Convert PIL to OpenCV
+            original_size = image.size
             img_array = np.array(image.convert("RGB"))
             height, width = img_array.shape[:2]
+            
+            # Для больших изображений GrabCut очень медленный
+            # Уменьшаем размер для ускорения, затем масштабируем маску обратно
+            max_dimension = 1024  # Максимальный размер для GrabCut
+            scale_factor = 1.0
+            if max(width, height) > max_dimension:
+                scale_factor = max_dimension / max(width, height)
+                new_width = int(width * scale_factor)
+                new_height = int(height * scale_factor)
+                logger.info(f"Resizing image for GrabCut: {width}x{height} -> {new_width}x{new_height}")
+                img_array = cv2.resize(img_array, (new_width, new_height), interpolation=cv2.INTER_AREA)
+                height, width = img_array.shape[:2]
 
             # Simple method: use grabcut with automatic rectangle
             # Create rectangle in center 80% of image
@@ -108,11 +123,14 @@ class BackgroundRemover:
                 int(height * 0.8),
             )
 
+            logger.info(f"Running GrabCut on {width}x{height} image (this may take a while...)")
             mask = np.zeros((height, width), np.uint8)
             bgd_model = np.zeros((1, 65), np.float64)
             fgd_model = np.zeros((1, 65), np.float64)
 
-            cv2.grabCut(img_array, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+            # Уменьшаем количество итераций для ускорения (было 5, делаем 3)
+            cv2.grabCut(img_array, mask, rect, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT)
+            logger.info("GrabCut completed, processing mask...")
 
             # Create alpha mask (0 and 2 = background, 1 and 3 = foreground)
             mask2 = np.where((mask == 2) | (mask == 0), 0, 255).astype("uint8")
@@ -122,8 +140,17 @@ class BackgroundRemover:
             mask2 = cv2.morphologyEx(mask2, cv2.MORPH_CLOSE, kernel)
             mask2 = cv2.morphologyEx(mask2, cv2.MORPH_OPEN, kernel)
 
+            # Если уменьшали размер, масштабируем маску обратно
+            if scale_factor < 1.0:
+                logger.info(f"Scaling mask back to original size: {original_size[0]}x{original_size[1]}")
+                mask2 = cv2.resize(mask2, original_size, interpolation=cv2.INTER_LINEAR)
+                # Также нужно масштабировать исходное изображение для альфа-канала
+                img_array_original = np.array(image.convert("RGB"))
+            else:
+                img_array_original = img_array
+
             # Create RGBA image
-            result = Image.fromarray(img_array).convert("RGBA")
+            result = Image.fromarray(img_array_original).convert("RGBA")
             alpha = Image.fromarray(mask2, mode="L")
             result.putalpha(alpha)
 
@@ -131,7 +158,7 @@ class BackgroundRemover:
             return result
 
         except Exception as e:
-            logger.error(f"Fallback background removal failed: {e}")
+            logger.error(f"Fallback background removal failed: {e}", exc_info=True)
             # Last resort: return image with full opacity
             if image.mode != "RGBA":
                 result = image.convert("RGBA")

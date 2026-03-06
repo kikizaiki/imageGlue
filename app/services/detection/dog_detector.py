@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class DogDetector:
-    """Detects dogs and dog heads in images."""
+    """Detects dogs, humans and their heads in images."""
 
     def __init__(self):
         """Initialize detector."""
@@ -38,12 +38,13 @@ class DogDetector:
 
         return self._model
 
-    def detect(self, image: Image.Image) -> DetectionResult:
+    def detect(self, image: Image.Image, entity_type: str = "dog") -> DetectionResult:
         """
-        Detect dog and head in image.
+        Detect entity (dog or human) and head in image.
 
         Args:
             image: PIL Image
+            entity_type: Type of entity to detect ("dog" or "human")
 
         Returns:
             DetectionResult
@@ -57,75 +58,97 @@ class DogDetector:
             # Convert to numpy
             img_array = np.array(image.convert("RGB"))
 
-            # Run detection (class 16 = dog in COCO)
+            # COCO classes: 0 = person, 16 = dog
+            entity_class = 16 if entity_type == "dog" else 0
+            entity_name_ru = "собака" if entity_type == "dog" else "человек"
+            entity_name_ru_genitive = "собаки" if entity_type == "dog" else "человека"
+            
+            logger.info(
+                f"Detecting {entity_type} (COCO class {entity_class}) "
+                f"with confidence threshold {settings.DETECTION_CONFIDENCE_THRESHOLD}"
+            )
+            
+            # Run detection
             results = model.predict(
                 img_array,
                 conf=settings.DETECTION_CONFIDENCE_THRESHOLD,
-                classes=[16],  # dog class
+                classes=[entity_class],
                 verbose=False,
             )
+            
+            logger.debug(f"YOLO detection results: {len(results)} result(s)")
 
             detections = []
             for result in results:
                 boxes = result.boxes
                 if boxes is None or len(boxes) == 0:
+                    logger.debug(f"No boxes found in YOLO result for {entity_type}")
                     continue
 
+                logger.debug(f"Found {len(boxes)} detection(s) for {entity_type} (class {entity_class})")
+                
                 for box in boxes:
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     confidence = float(box.conf[0].cpu().numpy())
+                    detected_class = int(box.cls[0].cpu().numpy()) if hasattr(box, 'cls') and box.cls is not None else entity_class
+                    
+                    logger.debug(
+                        f"Detection: class={detected_class} (expected {entity_class}), "
+                        f"confidence={confidence:.2f}, bbox=({x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f})"
+                    )
 
-                    dog_bbox = BBox(
+                    entity_bbox = BBox(
                         x1=float(x1),
                         y1=float(y1),
                         x2=float(x2),
                         y2=float(y2),
                     )
 
-                    # Estimate head bbox (upper portion of dog bbox)
-                    head_bbox = self._estimate_head_bbox(dog_bbox, img_array.shape)
+                    # Estimate head bbox (upper portion of entity bbox)
+                    head_bbox = self._estimate_head_bbox(entity_bbox, img_array.shape, entity_type)
 
                     detections.append(
                         {
-                            "dog_bbox": dog_bbox,
+                            "entity_bbox": entity_bbox,
                             "head_bbox": head_bbox,
                             "confidence": confidence,
+                            "detected_class": detected_class,
                         }
                     )
 
             if not detections:
-                raise DetectionError("Собака не обнаружена на изображении")
+                raise DetectionError(f"{entity_name_ru.capitalize()} не обнаружен на изображении")
 
             # Select best detection (highest confidence, then largest area)
             best = max(
                 detections,
-                key=lambda d: (d["confidence"], d["dog_bbox"].area),
+                key=lambda d: (d["confidence"], d["entity_bbox"].area),
             )
 
-            # Check if dog is large enough
+            # Check if entity is large enough
             image_area = image.width * image.height
-            dog_area_ratio = best["dog_bbox"].area / image_area
+            entity_area_ratio = best["entity_bbox"].area / image_area
 
-            if dog_area_ratio < settings.MIN_DOG_AREA_RATIO:
+            if entity_area_ratio < settings.MIN_DOG_AREA_RATIO:
                 raise DetectionError(
-                    f"Собака слишком маленькая на фото (занимает {dog_area_ratio*100:.1f}% кадра, "
+                    f"{entity_name_ru.capitalize()} слишком маленький на фото (занимает {entity_area_ratio*100:.1f}% кадра, "
                     f"минимум {settings.MIN_DOG_AREA_RATIO*100:.1f}%). "
-                    "Загрузите фото, где собака снята крупнее."
+                    f"Загрузите фото, где {entity_name_ru_genitive} снят крупнее."
                 )
 
             # Estimate orientation
-            orientation = self._estimate_orientation(best["dog_bbox"], img_array.shape)
+            orientation = self._estimate_orientation(best["entity_bbox"], img_array.shape)
 
             result = DetectionResult(
-                dog_bbox=best["dog_bbox"],
+                dog_bbox=best["entity_bbox"],  # Используем entity_bbox как dog_bbox для обратной совместимости
                 head_bbox=best["head_bbox"],
                 confidence=best["confidence"],
                 orientation=orientation,
             )
 
             logger.info(
-                f"Detection: confidence={result.confidence:.2f}, "
-                f"dog_bbox={result.dog_bbox.to_dict()}, "
+                f"Detection ({entity_type}): confidence={result.confidence:.2f}, "
+                f"bbox={result.dog_bbox.to_dict()}, "
                 f"head_bbox={result.head_bbox.to_dict() if result.head_bbox else None}"
             )
 
@@ -137,30 +160,37 @@ class DogDetector:
             logger.error(f"Detection error: {e}", exc_info=True)
             raise DetectionError(f"Ошибка детекции: {e}") from e
 
-    def _estimate_head_bbox(self, dog_bbox: BBox, image_shape: tuple) -> BBox:
+    def _estimate_head_bbox(self, entity_bbox: BBox, image_shape: tuple, entity_type: str = "dog") -> BBox:
         """
-        Estimate head bounding box from dog bbox.
+        Estimate head bounding box from entity bbox.
 
         Args:
-            dog_bbox: Dog bounding box
+            entity_bbox: Entity bounding box (dog or human)
             image_shape: Image shape (height, width, channels)
+            entity_type: Type of entity ("dog" or "human")
 
         Returns:
             Estimated head bounding box
         """
-        # Head is typically in upper 40% of dog bbox, centered horizontally
-        head_height_ratio = 0.4
-        head_width_ratio = 0.6
+        # Head parameters differ for dogs and humans
+        if entity_type == "human":
+            # For humans, head is typically in upper 20-25% of body bbox
+            head_height_ratio = 0.25
+            head_width_ratio = 0.5
+        else:
+            # For dogs, head is typically in upper 40% of dog bbox
+            head_height_ratio = 0.4
+            head_width_ratio = 0.6
 
-        dog_width = dog_bbox.width
-        dog_height = dog_bbox.height
+        entity_width = entity_bbox.width
+        entity_height = entity_bbox.height
 
-        head_width = dog_width * head_width_ratio
-        head_height = dog_height * head_height_ratio
+        head_width = entity_width * head_width_ratio
+        head_height = entity_height * head_height_ratio
 
         # Center horizontally, top-aligned
-        head_x1 = dog_bbox.center_x - head_width / 2
-        head_y1 = dog_bbox.y1
+        head_x1 = entity_bbox.center_x - head_width / 2
+        head_y1 = entity_bbox.y1
         head_x2 = head_x1 + head_width
         head_y2 = head_y1 + head_height
 

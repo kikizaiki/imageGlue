@@ -121,8 +121,15 @@ class RenderPipeline:
             stage_start = time.time()
             logger.info(f"Job {job_id}: Stage B - Subject Analysis")
             image = Image.open(image_path)
-            detection = self.detector.detect(image)
+            
+            # Получаем тип сущности из конфигурации шаблона
+            entity_type = template_config.get("entity_type", "dog")
+            logger.info(f"Job {job_id}: Template entity_type from config: {entity_type}")
+            logger.info(f"Job {job_id}: Detecting {entity_type} in image")
+            
+            detection = self.detector.detect(image, entity_type=entity_type)
             metadata["detection"] = detection.to_dict()
+            metadata["detection"]["entity_type"] = entity_type  # Сохраняем тип сущности в метаданных
 
             if debug:
                 # Draw detection overlay
@@ -130,12 +137,23 @@ class RenderPipeline:
 
                 overlay = image.copy()
                 draw = ImageDraw.Draw(overlay)
-                bbox = detection.dog_bbox
+                
+                # Рисуем основной bbox (entity bbox)
+                bbox = detection.dog_bbox  # dog_bbox содержит entity_bbox для обратной совместимости
+                entity_name = "собака" if entity_type == "dog" else "человек"
                 draw.rectangle(
                     [(bbox.x1, bbox.y1), (bbox.x2, bbox.y2)],
                     outline="red",
                     width=3,
                 )
+                # Добавляем подпись
+                draw.text(
+                    (bbox.x1, bbox.y1 - 20),
+                    f"{entity_name.capitalize()} (conf: {detection.confidence:.2f})",
+                    fill="red",
+                )
+                
+                # Рисуем head bbox
                 if detection.head_bbox:
                     hbbox = detection.head_bbox
                     draw.rectangle(
@@ -143,6 +161,17 @@ class RenderPipeline:
                         outline="blue",
                         width=2,
                     )
+                    draw.text(
+                        (hbbox.x1, hbbox.y1 - 15),
+                        "Head",
+                        fill="blue",
+                    )
+                
+                logger.info(
+                    f"Job {job_id}: Detection overlay: {entity_type} bbox={bbox.to_dict()}, "
+                    f"head_bbox={detection.head_bbox.to_dict() if detection.head_bbox else None}, "
+                    f"confidence={detection.confidence:.2f}"
+                )
                 storage.save_debug(overlay, "01_detection_overlay.png")
 
             metadata["timings"]["detection"] = time.time() - stage_start
@@ -150,9 +179,12 @@ class RenderPipeline:
             # Stage C: Segmentation
             stage_start = time.time()
             logger.info(f"Job {job_id}: Stage C - Segmentation")
-            cropped = self.crop_planner.extract_crop(
-                image, self.crop_planner.plan_crop(image, detection, template_config["placement"])
+            # Передаём entity_type для правильного кропа
+            entity_type = template_config.get("entity_type", "dog")
+            crop_bbox = self.crop_planner.plan_crop(
+                image, detection, template_config["placement"], entity_type=entity_type
             )
+            cropped = self.crop_planner.extract_crop(image, crop_bbox)
 
             if debug:
                 storage.save_debug(cropped, "02_crop.png")
@@ -255,10 +287,20 @@ class RenderPipeline:
                         
                         template_desc = template_config.get("title", "poster")
                         
-                        # Используем AI для интеграции исходного фото собаки в постер
-                        logger.info(
-                            f"Job {job_id}: Using AI to integrate dog into {template_desc}"
-                        )
+                        # Получаем промпт для AI интеграции из конфигурации шаблона
+                        ai_integration_config = template_config.get("ai_integration", {})
+                        ai_prompt = ai_integration_config.get("prompt", "")
+                        
+                        if not ai_prompt:
+                            raise CompositingError(
+                                f"AI integration prompt not found in template config. "
+                                f"Please add 'ai_integration.prompt' to {template_config.get('template_id', 'template')} config."
+                            )
+                        
+                        entity_type = template_config.get("entity_type", "dog")
+                        entity_name = "собаку" if entity_type == "dog" else "человека"
+                        logger.info(f"Job {job_id}: Using AI to integrate {entity_name} into {template_desc}")
+                        logger.debug(f"Job {job_id}: AI prompt: {ai_prompt[:100]}...")
                         
                         try:
                             # ВСЁ ДЕЛАЕМ ЧЕРЕЗ LLM - полная AI интеграция с исходным фото и постером
@@ -269,7 +311,7 @@ class RenderPipeline:
                             
                             refined_result = self.refiner.refine_compositing(
                                 None,  # Нет старого композитинга - только LLM
-                                template_desc,
+                                ai_prompt,  # Промпт из конфигурации шаблона
                                 detected_issues=[],
                                 original_dog_image=image,  # Исходное фото собаки - ОБЯЗАТЕЛЬНО
                                 poster_background=poster_background,  # Чистый постер - ОБЯЗАТЕЛЬНО
@@ -296,9 +338,15 @@ class RenderPipeline:
                                 if debug:
                                     storage.save_debug(temp_composite, "04_temp_composite_for_llm.png")
                                 
+                                # Для fallback используем промпт из конфига, если он есть
+                                fallback_prompt = ai_prompt if ai_prompt else (
+                                    "Improve the image. Ensure perfect color matching, "
+                                    "natural shadows, and seamless integration. "
+                                    "The result should be publication-ready."
+                                )
                                 refined_result = self.refiner.refine_compositing(
                                     temp_composite,  # Временный композит для LLM улучшения
-                                    template_desc,
+                                    fallback_prompt,  # Промпт из конфига или базовый для fallback
                                     detected_issues=[],
                                     original_dog_image=None,  # Не используем исходное фото
                                     poster_background=None,  # Не используем чистый постер
@@ -334,7 +382,7 @@ class RenderPipeline:
                         )
 
                         # 05_refined_pass1.png - это финальное изображение
-                        # KIE.ai обновляет собаку прямо в постере, затем применяются маски
+                        # KIE.ai обновляет сущность прямо в постере, затем применяются маски
                         if debug:
                             storage.save_debug(final_image, "05_refined_pass1.png")
                         

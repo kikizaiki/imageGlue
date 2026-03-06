@@ -17,6 +17,7 @@ class CropPlanner:
         image: Image.Image,
         detection: DetectionResult,
         crop_config: dict,
+        entity_type: str = "dog",
     ) -> BBox:
         """
         Plan crop for head-and-shoulders extraction.
@@ -25,13 +26,23 @@ class CropPlanner:
             image: Source image
             detection: Detection result
             crop_config: Crop configuration from template
+            entity_type: Type of entity ("dog" or "human")
 
         Returns:
             Crop bounding box
         """
         try:
-            # Use head bbox as base, or dog bbox if head not available
-            base_bbox = detection.head_bbox or detection.dog_bbox
+            # Для человека используем entity_bbox (весь человек) как базу,
+            # так как нужно захватить голову + плечи + верх груди
+            # Для собаки используем head_bbox как базу (голова собаки обычно больше относительно тела)
+            if entity_type == "human":
+                # Для человека: используем entity_bbox и расширяем его, чтобы захватить голову + плечи
+                base_bbox = detection.dog_bbox  # dog_bbox содержит entity_bbox
+                logger.debug(f"Using entity_bbox for human crop: {base_bbox.to_dict()}")
+            else:
+                # Для собаки: используем head_bbox как базу
+                base_bbox = detection.head_bbox or detection.dog_bbox
+                logger.debug(f"Using head_bbox for dog crop: {base_bbox.to_dict()}")
 
             # Get expansion factors
             expansion = crop_config.get("crop_expansion", {})
@@ -39,6 +50,15 @@ class CropPlanner:
             expand_right = expansion.get("right", 0.18)
             expand_top = expansion.get("top", 0.28)
             expand_bottom = expansion.get("bottom", 0.20)
+
+            # Для человека увеличиваем расширение вниз, чтобы захватить плечи и верх груди
+            if entity_type == "human":
+                # Если bottom expansion маленький, увеличиваем его
+                if expand_bottom < 0.3:
+                    expand_bottom = 0.4  # Захватываем больше вниз для плеч
+                # Уменьшаем top expansion, так как entity_bbox уже включает голову
+                if expand_top > 0.2:
+                    expand_top = 0.15  # Меньше расширяем вверх
 
             # Calculate expanded bbox
             width = base_bbox.width
@@ -58,7 +78,11 @@ class CropPlanner:
 
             crop_bbox = BBox(x1=x1, y1=y1, x2=x2, y2=y2)
 
-            logger.debug(f"Crop planned: {crop_bbox.to_dict()}")
+            logger.info(
+                f"Crop planned for {entity_type}: base={base_bbox.to_dict()}, "
+                f"expansion=(L:{expand_left:.2f}, R:{expand_right:.2f}, T:{expand_top:.2f}, B:{expand_bottom:.2f}), "
+                f"crop={crop_bbox.to_dict()}"
+            )
             return crop_bbox
 
         except Exception as e:
