@@ -42,5 +42,12 @@
     "glass_tint": 0.08,
     "grain_match": false,
     "color_match": true
+  },
+  "refinement": {
+    "enabled": true,
+    "improve_segmentation": true,
+    "improve_placement": false,
+    "second_pass": true,
+    "prompt_template": "Make the dog blend seamlessly into the astronaut poster. Fix edges, lighting, and color matching."
   }
 }

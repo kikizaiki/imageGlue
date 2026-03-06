@@ -160,6 +160,17 @@ class RenderPipeline:
             subject_rgba = self.segmenter.remove_background(cropped)
             metadata["segmentation"] = {"size": subject_rgba.size}
 
+            # Optional: AI-improved segmentation
+            if settings.REFINEMENT_ENABLED and self.refiner.api_key:
+                try:
+                    logger.info(f"Job {job_id}: Improving segmentation with AI")
+                    subject_rgba = self.refiner.refine_segmentation(subject_rgba, cropped)
+                    metadata["segmentation"]["ai_improved"] = True
+                    if debug:
+                        storage.save_debug(subject_rgba, "03_subject_rgba_ai_improved.png")
+                except Exception as e:
+                    logger.warning(f"AI segmentation improvement failed: {e}")
+
             if debug:
                 storage.save_debug(subject_rgba, "03_subject_rgba.png")
 
@@ -177,37 +188,201 @@ class RenderPipeline:
             )
             metadata["placement"] = placement
 
-            metadata["timings"]["placement"] = time.time() - stage_start
-
-            # Stage F: Compositing
-            stage_start = time.time()
-            logger.info(f"Job {job_id}: Stage F - Compositing")
-            compositor = Compositor(template_config)
-            final_image = compositor.compose(subject_rgba, placement)
-            metadata["compositing"] = {"size": final_image.size}
-
-            if debug:
-                storage.save_debug(final_image, "04_composited.png")
-
-            metadata["timings"]["compositing"] = time.time() - stage_start
-
-            # Stage G: Postprocess (handled in compositor)
-            # Stage H: Optional AI refinement
-            if settings.REFINEMENT_ENABLED:
-                stage_start = time.time()
-                logger.info(f"Job {job_id}: Stage H - AI Refinement")
+            # Optional: AI-improved placement (if enabled)
+            if (
+                settings.REFINEMENT_ENABLED
+                and self.refiner.api_key
+                and template_config.get("refinement", {}).get("improve_placement", False)
+            ):
                 try:
-                    final_image = self.refiner.refine(final_image)
-                    metadata["refinement"] = {"applied": True}
+                    logger.info(f"Job {job_id}: Improving placement with AI")
+                    # Load base for AI placement
+                    base_path = (
+                        Path(template_config["_template_dir"])
+                        / template_config["assets"]["base_clean"]
+                    )
+                    base_image = Image.open(base_path).convert("RGB")
 
+                    # Use AI to improve placement
+                    improved_composite = self.refiner.refine_placement(
+                        subject_rgba,
+                        base_image,
+                        placement_hint=template_config["placement"]
+                        .get("insert_zone", {})
+                        .get("description", "center"),
+                    )
+
+                    # Extract improved subject position (simplified)
+                    # For now, we'll use the improved composite directly in next stage
+                    metadata["placement"]["ai_improved"] = True
                     if debug:
-                        storage.save_debug(final_image, "05_refined.png")
+                        storage.save_debug(improved_composite, "03_ai_placement.png")
 
                 except Exception as e:
-                    logger.warning(f"Refinement failed: {e}, using original")
-                    metadata["refinement"] = {"applied": False, "error": str(e)}
+                    logger.warning(f"AI placement improvement failed: {e}")
+
+            metadata["timings"]["placement"] = time.time() - stage_start
+
+            # Stage F: Пропускаем старый композитинг - ВСЁ ДЕЛАЕМ ЧЕРЕЗ LLM
+            # Stage H: AI Integration - ВСЁ ДЕЛАЕМ ЧЕРЕЗ LLM, без старого композитинга
+            final_image = None  # Будет установлен через AI
+            
+            if settings.REFINEMENT_ENABLED:
+                stage_start = time.time()
+                logger.info(f"Job {job_id}: Stage H - AI Integration")
+                
+                # Check if API key is available
+                if not self.refiner.api_key:
+                    logger.warning(
+                        f"Job {job_id}: KIE_API_KEY not set, skipping AI integration. "
+                        "Add KIE_API_KEY to .env file to enable AI refinement."
+                    )
+                    metadata["refinement"] = {
+                        "applied": False,
+                        "reason": "no_api_key",
+                        "message": "KIE_API_KEY not configured in .env",
+                    }
+                else:
+                    try:
+                        logger.info(f"Job {job_id}: API key available, starting AI integration")
+                        
+                        # Загружаем чистый постер для AI интеграции
+                        base_path = (
+                            Path(template_config["_template_dir"])
+                            / template_config["assets"]["base_clean"]
+                        )
+                        poster_background = Image.open(base_path).convert("RGB")
+                        
+                        template_desc = template_config.get("title", "poster")
+                        
+                        # Используем AI для интеграции исходного фото собаки в постер
+                        logger.info(
+                            f"Job {job_id}: Using AI to integrate dog into {template_desc}"
+                        )
+                        
+                        try:
+                            # ВСЁ ДЕЛАЕМ ЧЕРЕЗ LLM - полная AI интеграция с исходным фото и постером
+                            # БЕЗ старого композитинга - сразу отправляем в LLM
+                            logger.info(f"Job {job_id}: 🎨 Starting LLM-based integration (NO old compositing)")
+                            logger.info(f"Job {job_id}: 📤 Sending original dog image + poster to LLM for smart integration")
+                            logger.info(f"Job {job_id}: 🚫 Old compositing SKIPPED - everything through LLM")
+                            
+                            refined_result = self.refiner.refine_compositing(
+                                None,  # Нет старого композитинга - только LLM
+                                template_desc,
+                                detected_issues=[],
+                                original_dog_image=image,  # Исходное фото собаки - ОБЯЗАТЕЛЬНО
+                                poster_background=poster_background,  # Чистый постер - ОБЯЗАТЕЛЬНО
+                            )
+                            
+                            # ВСЕГДА используем результат AI если он получен
+                            if refined_result is not None:
+                                final_image = refined_result
+                                logger.info(f"Job {job_id}: ✅✅✅ LLM integration successful - USING AI RESULT")
+                                logger.info(f"Job {job_id}: ✅ Final image size: {final_image.size}")
+                            else:
+                                logger.error(f"Job {job_id}: ❌ AI returned None result")
+                                raise CompositingError("LLM integration returned None - cannot proceed without AI result")
+                                
+                        except CompositingError as e:
+                            # Если полная интеграция не удалась - пробуем альтернативный подход через LLM
+                            logger.warning(f"Job {job_id}: Full LLM integration failed ({e}), trying alternative LLM approach")
+                            try:
+                                # Создаём временный простой композит ТОЛЬКО для LLM улучшения (не для финального результата)
+                                from app.services.compositing.compositor import Compositor
+                                temp_compositor = Compositor(template_config)
+                                temp_composite = temp_compositor.compose(subject_rgba, placement)
+                                
+                                if debug:
+                                    storage.save_debug(temp_composite, "04_temp_composite_for_llm.png")
+                                
+                                refined_result = self.refiner.refine_compositing(
+                                    temp_composite,  # Временный композит для LLM улучшения
+                                    template_desc,
+                                    detected_issues=[],
+                                    original_dog_image=None,  # Не используем исходное фото
+                                    poster_background=None,  # Не используем чистый постер
+                                )
+                                if refined_result:
+                                    final_image = refined_result
+                                    logger.info(f"Job {job_id}: ✅ Alternative LLM approach successful")
+                                else:
+                                    raise CompositingError("Alternative LLM approach also returned None")
+                            except Exception as e2:
+                                logger.error(f"Job {job_id}: ❌ All LLM approaches failed: {e2}")
+                                raise CompositingError(f"LLM integration completely failed: {e2}") from e2
+                        
+                        # Проверяем что у нас есть финальное изображение
+                        if final_image is None:
+                            raise CompositingError("No final image generated - LLM integration failed")
+                        
+                        logger.info(f"Job {job_id}: ✅✅✅ FINAL RESULT: Using LLM-generated image (NO old compositing)")
+                        
+                        # Метаданные для AI результата
+                        metadata["refinement"] = {
+                            "applied": True,
+                            "passes": 1,
+                            "type": "llm_integration",
+                            "method": "full_llm_integration",
+                            "old_compositing": False,
+                        }
+                        logger.info(f"Job {job_id}: ✅ Dog integrated successfully using LLM (no old compositing)")
+
+                        if debug:
+                            storage.save_debug(final_image, "05_refined_pass1.png")
+
+                        # Optional second pass for fine-tuning
+                        if template_config.get("refinement", {}).get("second_pass", False):
+                            logger.info(f"Job {job_id}: Second refinement pass")
+                            refined_image = self.refiner.refine(
+                                final_image,
+                                prompt=(
+                                    "Fine-tune the image. Ensure perfect color matching, "
+                                    "natural shadows, and seamless integration. "
+                                    "The result should be publication-ready."
+                                ),
+                                refinement_type="compositing",
+                            )
+                            
+                            if refined_image.size == final_image.size:
+                                import numpy as np
+                                if not np.array_equal(
+                                    np.array(final_image), np.array(refined_image)
+                                ):
+                                    final_image = refined_image
+                            else:
+                                final_image = refined_image
+                                
+                            metadata["refinement"]["passes"] = 2
+                            if debug:
+                                storage.save_debug(final_image, "05_refined_pass2.png")
+
+                        if debug:
+                            storage.save_debug(final_image, "05_refined.png")
+
+                    except Exception as e:
+                        logger.error(f"Refinement failed: {e}", exc_info=True)
+                        logger.error(f"❌ LLM integration completely failed: {e}")
+                        logger.error(f"Job {job_id}: Cannot proceed without LLM - no fallback available")
+                        metadata["refinement"] = {
+                            "applied": False,
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                        }
+                        # Без LLM мы не можем создать финальное изображение
+                        raise CompositingError(f"LLM integration failed and no fallback available: {e}") from e
 
                 metadata["timings"]["refinement"] = time.time() - stage_start
+            else:
+                # Если REFINEMENT_ENABLED = False, мы не можем создать финальное изображение
+                raise CompositingError(
+                    "REFINEMENT_ENABLED is False - LLM integration is required. "
+                    "Set REFINEMENT_ENABLED=True in .env"
+                )
+            
+            # Проверяем что финальное изображение создано
+            if final_image is None:
+                raise CompositingError("No final image generated - LLM integration is required")
 
             # Stage I: Quality gate
             stage_start = time.time()

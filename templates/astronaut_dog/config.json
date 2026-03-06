@@ -1,0 +1,67 @@
+{
+  "template_id": "astronaut_dog",
+  "title": "Astronaut Dog",
+  "version": "1.0.0",
+  "enabled": true,
+  "supported_entities": ["dog"],
+  "canvas": {
+    "width": 1024,
+    "height": 1024,
+    "background_color": "#000000"
+  },
+  "layers": {
+    "background": {
+      "path": "background.png"
+    },
+    "foreground": {
+      "path": "foreground.png"
+    }
+  },
+  "visor_mask": {
+    "path": "visor_mask.png"
+  },
+  "placement": {
+    "target_area": {
+      "x": 200,
+      "y": 300,
+      "width": 624,
+      "height": 424
+    },
+    "anchor_mode": "center",
+    "fit_mode": "contain",
+    "crop_expansion": {
+      "expand_left": 0.4,
+      "expand_right": 0.4,
+      "expand_top": 0.3,
+      "expand_bottom": 0.6
+    },
+    "crop_vertical_shift": 30,
+    "padding": 20,
+    "horizontal_bias": 0.0,
+    "vertical_bias": 0.15,
+    "scale_multiplier": 1.2,
+    "min_scale": 0.5,
+    "max_scale": 2.0
+  },
+  "compositing": {
+    "feather_alpha": true,
+    "edge_cleanup": true,
+    "alpha_feather_px": 3,
+    "alpha_erode_px": 0,
+    "remove_halo": true,
+    "halo_threshold": 240
+  },
+  "color_match": {
+    "enabled": true,
+    "contrast": 1.05,
+    "brightness": 0.98,
+    "tint_rgb": [0.98, 0.99, 1.02]
+  },
+  "output": {
+    "format": "png",
+    "quality": 95
+  },
+  "debug": {
+    "save_intermediates": true
+  }
+}
