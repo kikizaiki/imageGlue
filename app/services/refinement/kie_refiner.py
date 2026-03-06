@@ -350,7 +350,7 @@ class KIERefiner:
 
     def _get_task_status(self, task_id: str) -> dict[str, Any]:
         """
-        Get task status from KIE.ai using recordInfo endpoint.
+        Get task status from KIE.ai using recordInfo endpoint with retry logic.
 
         Based on KIE.ai documentation:
         - Get Task Details: https://docs.kie.ai/market/common/get-task-detail
@@ -364,50 +364,91 @@ class KIERefiner:
 
         Returns:
             Task data dict (from payload.data)
+
+        Raises:
+            CompositingError: If all retry attempts fail
         """
-        try:
-            # Используем GET запрос с query параметром taskId
-            url = f"{self.api_url}/api/v1/jobs/recordInfo"
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-            }
-            
-            with httpx.Client(timeout=30.0) as client:
-                response = client.get(
-                    url,
-                    headers=headers,
-                    params={"taskId": task_id},
+        import time
+        
+        last_error = None
+        max_retries = 5
+        
+        for attempt in range(max_retries):
+            try:
+                # Создаём новый client на каждый запрос для избежания проблем с proxy/TLS
+                url = f"{self.api_url}/api/v1/jobs/recordInfo"
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                }
+                
+                with httpx.Client(
                     timeout=30.0,
+                    follow_redirects=True,
+                    verify=True,
+                ) as client:
+                    response = client.get(
+                        url,
+                        headers=headers,
+                        params={"taskId": task_id},
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    
+                    # Логируем полный ответ для отладки (только на первой попытке)
+                    if attempt == 0:
+                        logger.debug(f"recordInfo response: {payload}")
+                    
+                    # Проверяем code в ответе
+                    code = payload.get("code")
+                    if code != 200:
+                        error_msg = payload.get("msg", "Unknown error")
+                        raise CompositingError(f"KIE.ai recordInfo failed (code {code}): {error_msg}")
+                    
+                    # Возвращаем data из ответа
+                    data = payload.get("data") or {}
+                    return data
+                    
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectTimeout) as e:
+                last_error = e
+                wait_time = min(2 * (attempt + 1), 10)  # Exponential backoff, max 10s
+                logger.warning(
+                    f"KIE status poll failed (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {wait_time}s..."
                 )
-                response.raise_for_status()
-                payload = response.json()
+                if attempt < max_retries - 1:
+                    time.sleep(wait_time)
+                else:
+                    # Последняя попытка - не ждём
+                    break
+                    
+            except httpx.HTTPStatusError as e:
+                # HTTP ошибки (4xx, 5xx) не ретраим
+                error_detail = e.response.text[:500] if e.response and e.response.text else str(e)
+                logger.error(f"Failed to get task status (HTTP {e.response.status_code if e.response else 'unknown'}): {error_detail}")
+                raise CompositingError(f"Failed to get task status: {error_detail}") from e
                 
-                # Логируем полный ответ для отладки
-                logger.debug(f"recordInfo response: {payload}")
+            except CompositingError:
+                # Бизнес-логика ошибки - не ретраим
+                raise
                 
-                # Проверяем code в ответе
-                code = payload.get("code")
-                if code != 200:
-                    error_msg = payload.get("msg", "Unknown error")
-                    raise CompositingError(f"KIE.ai recordInfo failed (code {code}): {error_msg}")
-                
-                # Возвращаем data из ответа
-                data = payload.get("data") or {}
-                return data
-                
-        except httpx.HTTPStatusError as e:
-            error_detail = e.response.text[:500] if e.response and e.response.text else str(e)
-            logger.error(f"Failed to get task status (HTTP {e.response.status_code if e.response else 'unknown'}): {error_detail}")
-            raise CompositingError(f"Failed to get task status: {error_detail}") from e
-        except CompositingError:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to get task status: {e}")
-            raise CompositingError(f"Failed to get task status: {e}") from e
+            except Exception as e:
+                last_error = e
+                wait_time = min(2 * (attempt + 1), 10)
+                logger.warning(
+                    f"Unexpected error in status poll (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {wait_time}s..."
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(wait_time)
+                else:
+                    break
+        
+        # Все попытки исчерпаны
+        raise CompositingError(f"Failed to get task status after {max_retries} retries: {last_error}")
 
     def _wait_for_task_completion(self, task_id: str, max_wait: int = 300) -> dict[str, Any]:
         """
-        Wait for task completion by polling status.
+        Wait for task completion by polling status with soft error handling.
 
         Based on KIE.ai documentation:
         - Status is in data.state (not status)
@@ -420,17 +461,25 @@ class KIERefiner:
 
         Returns:
             Final task data dict (from recordInfo data)
+
+        Raises:
+            CompositingError: If task fails or timeout exceeded
         """
         import time
         
         start_time = time.time()
-        poll_interval = 5  # Poll every 5 seconds
+        poll_interval = 7  # Poll every 7 seconds (увеличен для стабильности через proxy)
+        consecutive_errors = 0
+        max_consecutive_errors = 5  # Максимум ошибок подряд перед отказом
         
-        logger.info(f"Waiting for task {task_id} to complete (max {max_wait}s)...")
+        logger.info(f"Waiting for task {task_id} to complete (max {max_wait}s, poll every {poll_interval}s)...")
         
         while time.time() - start_time < max_wait:
             try:
                 data = self._get_task_status(task_id)
+                
+                # Сбрасываем счётчик ошибок при успешном запросе
+                consecutive_errors = 0
                 
                 # Проверяем state (не status!)
                 state = (data.get("state") or "").lower()
@@ -448,10 +497,24 @@ class KIERefiner:
                 logger.debug(f"Task {task_id} state: {state}, waiting...")
                 time.sleep(poll_interval)
                     
-            except CompositingError:
+            except CompositingError as e:
+                # Бизнес-логика ошибки (task failed) - не продолжаем
                 raise
+                
             except Exception as e:
-                logger.warning(f"Error checking task status: {e}, retrying...")
+                consecutive_errors += 1
+                logger.warning(
+                    f"Error checking task status (consecutive errors: {consecutive_errors}/{max_consecutive_errors}): {e}"
+                )
+                
+                # Если слишком много ошибок подряд - прекращаем
+                if consecutive_errors >= max_consecutive_errors:
+                    raise CompositingError(
+                        f"Too many consecutive errors while polling task {task_id}: {consecutive_errors} errors. "
+                        f"Last error: {e}"
+                    )
+                
+                # Мягкая обработка: ждём и продолжаем polling
                 time.sleep(poll_interval)
         
         raise CompositingError(f"Task {task_id} did not complete within {max_wait}s")
@@ -595,7 +658,7 @@ class KIERefiner:
             "10. Не должно быть видно признаков композитинга, вырезания или вставки. "
             "Сделай так, чтобы выглядело как будто профессиональный дизайнер создал это изображение с нуля."
         )
-
+        
         logger.info(f"Using AI prompt for refinement: {prompt[:100]}...")
         return self._refine_with_prompt(composed_image, prompt)
 
