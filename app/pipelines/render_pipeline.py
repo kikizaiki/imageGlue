@@ -328,8 +328,13 @@ class RenderPipeline:
                         }
                         logger.info(f"Job {job_id}: ✅ Dog integrated successfully using LLM (no old compositing)")
 
+                        # Применяем occlusion_mask и glass_fx поверх результата от KIE.ai
+                        final_image = self._apply_post_ai_layers(
+                            final_image, template_config, debug, storage, job_id
+                        )
+
                         # 05_refined_pass1.png - это финальное изображение
-                        # KIE.ai обновляет собаку прямо в постере, результат используется как есть
+                        # KIE.ai обновляет собаку прямо в постере, затем применяются маски
                         if debug:
                             storage.save_debug(final_image, "05_refined_pass1.png")
                         
@@ -396,3 +401,77 @@ class RenderPipeline:
             if debug:
                 storage.save_metadata(metadata)
             raise
+
+    def _apply_post_ai_layers(
+        self,
+        image: Image.Image,
+        template_config: dict[str, Any],
+        debug: bool,
+        storage: Storage,
+        job_id: str,
+    ) -> Image.Image:
+        """
+        Apply occlusion_mask and glass_fx layers on top of AI result.
+        
+        Args:
+            image: Image from KIE.ai
+            template_config: Template configuration
+            debug: Debug mode
+            storage: Storage instance
+            job_id: Job ID
+            
+        Returns:
+            Final image with layers applied
+        """
+        from pathlib import Path
+        
+        result = image.convert("RGBA")
+        template_dir = Path(template_config.get("_template_dir", ""))
+        
+        # Apply occlusion_mask if present
+        if "assets" in template_config and "occlusion_mask" in template_config["assets"]:
+            occlusion_path = template_dir / template_config["assets"]["occlusion_mask"]
+            if occlusion_path.exists():
+                try:
+                    logger.info(f"Job {job_id}: Applying occlusion_mask...")
+                    occlusion = Image.open(occlusion_path).convert("RGBA")
+                    
+                    # Resize occlusion_mask to match image size
+                    if occlusion.size != result.size:
+                        occlusion = occlusion.resize(result.size, Image.Resampling.LANCZOS)
+                    
+                    # Composite occlusion_mask on top
+                    result = Image.alpha_composite(result, occlusion)
+                    logger.info(f"Job {job_id}: ✅ occlusion_mask applied")
+                    
+                    if debug:
+                        storage.save_debug(result.convert("RGB"), "06_after_occlusion_mask.png")
+                except Exception as e:
+                    logger.warning(f"Job {job_id}: Failed to apply occlusion_mask: {e}")
+            else:
+                logger.warning(f"Job {job_id}: occlusion_mask not found: {occlusion_path}")
+        
+        # Apply glass_fx if present
+        if "assets" in template_config and "glass_fx" in template_config["assets"]:
+            glass_path = template_dir / template_config["assets"]["glass_fx"]
+            if glass_path.exists():
+                try:
+                    logger.info(f"Job {job_id}: Applying glass_fx...")
+                    glass = Image.open(glass_path).convert("RGBA")
+                    
+                    # Resize glass_fx to match image size
+                    if glass.size != result.size:
+                        glass = glass.resize(result.size, Image.Resampling.LANCZOS)
+                    
+                    # Composite glass_fx on top
+                    result = Image.alpha_composite(result, glass)
+                    logger.info(f"Job {job_id}: ✅ glass_fx applied")
+                    
+                    if debug:
+                        storage.save_debug(result.convert("RGB"), "07_after_glass_fx.png")
+                except Exception as e:
+                    logger.warning(f"Job {job_id}: Failed to apply glass_fx: {e}")
+            else:
+                logger.warning(f"Job {job_id}: glass_fx not found: {glass_path}")
+        
+        return result.convert("RGB")
