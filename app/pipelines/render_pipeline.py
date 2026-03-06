@@ -328,37 +328,12 @@ class RenderPipeline:
                         }
                         logger.info(f"Job {job_id}: ✅ Dog integrated successfully using LLM (no old compositing)")
 
+                        # 05_refined_pass1.png - это финальное изображение
+                        # KIE.ai обновляет собаку прямо в постере, результат используется как есть
                         if debug:
                             storage.save_debug(final_image, "05_refined_pass1.png")
-
-                        # Optional second pass for fine-tuning
-                        if template_config.get("refinement", {}).get("second_pass", False):
-                            logger.info(f"Job {job_id}: Second refinement pass")
-                            refined_image = self.refiner.refine(
-                                final_image,
-                                prompt=(
-                                    "Fine-tune the image. Ensure perfect color matching, "
-                                    "natural shadows, and seamless integration. "
-                                    "The result should be publication-ready."
-                                ),
-                                refinement_type="compositing",
-                            )
-                            
-                            if refined_image.size == final_image.size:
-                                import numpy as np
-                                if not np.array_equal(
-                                    np.array(final_image), np.array(refined_image)
-                                ):
-                                    final_image = refined_image
-                            else:
-                                final_image = refined_image
-                                
-                            metadata["refinement"]["passes"] = 2
-                            if debug:
-                                storage.save_debug(final_image, "05_refined_pass2.png")
-
-                        if debug:
-                            storage.save_debug(final_image, "05_refined.png")
+                        
+                        logger.info(f"Job {job_id}: ✅ Final image ready: 05_refined_pass1.png ({final_image.size})")
 
                     except Exception as e:
                         logger.error(f"Refinement failed: {e}", exc_info=True)

@@ -787,30 +787,9 @@ class KIERefiner:
             
             result_image = self._download_image_from_url(result_url)
             
-            # Проверяем и исправляем размер результата - должен совпадать с исходным постером
-            original_size = poster_background.size
-            result_size = result_image.size
-            
-            if result_size != original_size:
-                logger.info(
-                    f"Result size ({result_size}) differs from original poster size ({original_size}). "
-                    f"Resizing with aspect ratio preservation..."
-                )
-                
-                # Умное изменение размера с сохранением пропорций
-                # Используем цвет из углов исходного постера для padding
-                bg_color = self._get_background_color(poster_background)
-                result_image = self._resize_with_aspect_ratio(
-                    result_image, 
-                    target_width=original_size[0], 
-                    target_height=original_size[1],
-                    background_color=bg_color
-                )
-                logger.info(f"✅ Result resized to {result_image.size} to match original poster (aspect ratio preserved)")
-            else:
-                logger.info(f"✅ Result size matches original poster: {result_size}")
-            
-            logger.info("✅ Dog integrated into poster using AI")
+            # Используем результат от KIE.ai как есть - без кропов, без изменения размера
+            # KIE.ai должен вернуть постер с обновлённой собакой того же размера
+            logger.info(f"✅ Dog integrated into poster using AI. Result size: {result_image.size}")
             return result_image
             
         except Exception as e:
@@ -945,22 +924,8 @@ class KIERefiner:
             # Download result image
             result_image = self._download_image_from_url(result_url)
             
-            # Проверяем и исправляем размер результата - должен совпадать с исходным изображением
-            original_size = image.size
-            result_size = result_image.size
-            
-            if result_size != original_size:
-                logger.info(
-                    f"Result size ({result_size}) differs from original image size ({original_size}). "
-                    f"Resizing to match original size..."
-                )
-                # Используем LANCZOS для высокого качества при изменении размера
-                result_image = result_image.resize(original_size, Image.Resampling.LANCZOS)
-                logger.info(f"✅ Result resized to {result_image.size} to match original image")
-            else:
-                logger.info(f"✅ Result size matches original image: {result_size}")
-            
-            logger.info("✅ Image refined using KIE.ai GPT Image 1.5")
+            # Используем результат от KIE.ai как есть - без кропов, без изменения размера
+            logger.info(f"✅ Image refined using KIE.ai GPT Image 1.5. Result size: {result_image.size}")
             return result_image
 
         except CompositingError:
@@ -1053,6 +1018,53 @@ class KIERefiner:
         avg_b = sum(c[2] for c in colors) // len(colors)
         
         return (avg_r, avg_g, avg_b)
+
+    def _crop_to_size(
+        self,
+        image: Image.Image,
+        target_width: int,
+        target_height: int,
+    ) -> Image.Image:
+        """
+        Crop image center to target size without changing aspect ratio.
+        
+        If image is smaller than target, it will be resized to fit (maintaining aspect ratio)
+        and then cropped. If image is larger, it will be cropped from center.
+        
+        Args:
+            image: Image to crop
+            target_width: Target width
+            target_height: Target height
+            
+        Returns:
+            Cropped/resized image with target dimensions
+        """
+        original_width, original_height = image.size
+        
+        # Если изображение меньше целевого размера - увеличиваем с сохранением пропорций
+        if original_width < target_width or original_height < target_height:
+            # Вычисляем масштаб для подгонки по большей стороне
+            scale_w = target_width / original_width
+            scale_h = target_height / original_height
+            scale = max(scale_w, scale_h)  # Используем больший масштаб
+            
+            new_width = int(original_width * scale)
+            new_height = int(original_height * scale)
+            
+            # Увеличиваем изображение
+            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            original_width, original_height = new_width, new_height
+        
+        # Обрезаем центр изображения до нужного размера
+        left = (original_width - target_width) // 2
+        top = (original_height - target_height) // 2
+        right = left + target_width
+        bottom = top + target_height
+        
+        # Обрезаем
+        cropped = image.crop((left, top, right, bottom))
+        
+        return cropped
 
     def _resize_with_aspect_ratio(
         self,
