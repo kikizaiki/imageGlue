@@ -709,15 +709,22 @@ class KIERefiner:
             # Правильный формат payload согласно документации KIE.ai
             # input_urls и prompt должны быть внутри объекта input
             # Модель для image-to-image: gpt-image/1.5-image-to-image
+            # Вычисляем правильный aspect_ratio из исходного постера
+            poster_width, poster_height = poster_background.size
+            # Упрощаем aspect_ratio до ближайшего стандартного значения
+            aspect_ratio_str = self._calculate_aspect_ratio(poster_width, poster_height)
+            
             payload = {
                 "model": "gpt-image/1.5-image-to-image",  # Правильное имя модели для image-to-image
                 "input": {
                     "input_urls": [poster_file_url, dog_file_url],  # Постер как основа, собака для интеграции
                     "prompt": prompt,
-                    "aspect_ratio": "3:2",  # Опционально, но рекомендуется
+                    "aspect_ratio": aspect_ratio_str,  # Используем aspect_ratio исходного постера
                     "quality": "medium",  # Опционально
                 },
             }
+            
+            logger.info(f"Using aspect_ratio: {aspect_ratio_str} (from poster size {poster_width}x{poster_height})")
             
             logger.info(f"Creating task with model: {payload['model']}, {len(payload['input']['input_urls'])} input URL(s)")
             logger.debug(f"Prompt: {prompt[:100]}...")
@@ -779,6 +786,30 @@ class KIERefiner:
             logger.info(f"Got result URL from resultJson: {result_url[:50]}...")
             
             result_image = self._download_image_from_url(result_url)
+            
+            # Проверяем и исправляем размер результата - должен совпадать с исходным постером
+            original_size = poster_background.size
+            result_size = result_image.size
+            
+            if result_size != original_size:
+                logger.info(
+                    f"Result size ({result_size}) differs from original poster size ({original_size}). "
+                    f"Resizing with aspect ratio preservation..."
+                )
+                
+                # Умное изменение размера с сохранением пропорций
+                # Используем цвет из углов исходного постера для padding
+                bg_color = self._get_background_color(poster_background)
+                result_image = self._resize_with_aspect_ratio(
+                    result_image, 
+                    target_width=original_size[0], 
+                    target_height=original_size[1],
+                    background_color=bg_color
+                )
+                logger.info(f"✅ Result resized to {result_image.size} to match original poster (aspect ratio preserved)")
+            else:
+                logger.info(f"✅ Result size matches original poster: {result_size}")
+            
             logger.info("✅ Dog integrated into poster using AI")
             return result_image
             
@@ -913,6 +944,22 @@ class KIERefiner:
             
             # Download result image
             result_image = self._download_image_from_url(result_url)
+            
+            # Проверяем и исправляем размер результата - должен совпадать с исходным изображением
+            original_size = image.size
+            result_size = result_image.size
+            
+            if result_size != original_size:
+                logger.info(
+                    f"Result size ({result_size}) differs from original image size ({original_size}). "
+                    f"Resizing to match original size..."
+                )
+                # Используем LANCZOS для высокого качества при изменении размера
+                result_image = result_image.resize(original_size, Image.Resampling.LANCZOS)
+                logger.info(f"✅ Result resized to {result_image.size} to match original image")
+            else:
+                logger.info(f"✅ Result size matches original image: {result_size}")
+            
             logger.info("✅ Image refined using KIE.ai GPT Image 1.5")
             return result_image
 
@@ -922,6 +969,152 @@ class KIERefiner:
             logger.error(f"Refinement error: {e}", exc_info=True)
             logger.warning("Returning original image due to refinement error")
             return image
+
+    def _calculate_aspect_ratio(self, width: int, height: int) -> str:
+        """
+        Calculate closest standard aspect ratio from image dimensions.
+        
+        Args:
+            width: Image width
+            height: Image height
+            
+        Returns:
+            Aspect ratio string (e.g., "3:2", "16:9", "4:3")
+        """
+        ratio = width / height
+        
+        # Стандартные aspect ratios
+        standard_ratios = {
+            "1:1": 1.0,
+            "4:3": 4/3,
+            "3:2": 3/2,
+            "16:9": 16/9,
+            "21:9": 21/9,
+            "2:3": 2/3,
+            "3:4": 3/4,
+            "9:16": 9/16,
+        }
+        
+        # Находим ближайший стандартный aspect ratio
+        closest_ratio = "3:2"  # По умолчанию
+        min_diff = float('inf')
+        
+        for ratio_str, ratio_value in standard_ratios.items():
+            diff = abs(ratio - ratio_value)
+            if diff < min_diff:
+                min_diff = diff
+                closest_ratio = ratio_str
+        
+        return closest_ratio
+
+    def _get_background_color(self, image: Image.Image) -> tuple[int, int, int]:
+        """
+        Get dominant background color from image corners.
+        
+        Args:
+            image: Image to analyze
+            
+        Returns:
+            RGB tuple representing background color
+        """
+        # Берем пиксели из углов изображения
+        width, height = image.size
+        corner_size = min(50, width // 10, height // 10)  # Размер области для анализа
+        
+        corners = [
+            (0, 0),  # Верхний левый
+            (width - corner_size, 0),  # Верхний правый
+            (0, height - corner_size),  # Нижний левый
+            (width - corner_size, height - corner_size),  # Нижний правый
+        ]
+        
+        colors = []
+        rgb_image = image.convert("RGB")
+        
+        for x, y in corners:
+            # Берем небольшую область из угла
+            box = (x, y, min(x + corner_size, width), min(y + corner_size, height))
+            corner_region = rgb_image.crop(box)
+            
+            # Получаем средний цвет области
+            pixels = list(corner_region.getdata())
+            if pixels:
+                avg_r = sum(p[0] for p in pixels) // len(pixels)
+                avg_g = sum(p[1] for p in pixels) // len(pixels)
+                avg_b = sum(p[2] for p in pixels) // len(pixels)
+                colors.append((avg_r, avg_g, avg_b))
+        
+        if not colors:
+            return (255, 255, 255)  # Fallback на белый
+        
+        # Возвращаем средний цвет из всех углов
+        avg_r = sum(c[0] for c in colors) // len(colors)
+        avg_g = sum(c[1] for c in colors) // len(colors)
+        avg_b = sum(c[2] for c in colors) // len(colors)
+        
+        return (avg_r, avg_g, avg_b)
+
+    def _resize_with_aspect_ratio(
+        self,
+        image: Image.Image,
+        target_width: int,
+        target_height: int,
+        background_color: tuple[int, int, int] = (255, 255, 255),
+    ) -> Image.Image:
+        """
+        Resize image to target size while preserving aspect ratio.
+        
+        If aspect ratios don't match, the image will be resized to fit within
+        the target dimensions and centered on a canvas of the target size.
+        
+        Args:
+            image: Image to resize
+            target_width: Target width
+            target_height: Target height
+            background_color: Background color for padding (RGB tuple)
+            
+        Returns:
+            Resized image with target dimensions
+        """
+        original_width, original_height = image.size
+        original_ratio = original_width / original_height
+        target_ratio = target_width / target_height
+        
+        # Вычисляем размеры с сохранением пропорций
+        if original_ratio > target_ratio:
+            # Изображение шире - подгоняем по ширине
+            new_width = target_width
+            new_height = int(target_width / original_ratio)
+        else:
+            # Изображение выше - подгоняем по высоте
+            new_height = target_height
+            new_width = int(target_height * original_ratio)
+        
+        # Изменяем размер изображения с сохранением пропорций
+        resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Создаём холст нужного размера с фоном
+        if image.mode == "RGBA":
+            # Для RGBA используем прозрачный фон или конвертируем в RGB
+            canvas = Image.new("RGB", (target_width, target_height), background_color)
+            # Конвертируем RGBA в RGB для вставки
+            if resized.mode == "RGBA":
+                # Создаём временный RGB для вставки
+                rgb_resized = Image.new("RGB", resized.size, background_color)
+                rgb_resized.paste(resized, mask=resized.split()[3])
+                resized = rgb_resized
+        else:
+            canvas = Image.new("RGB", (target_width, target_height), background_color)
+            if resized.mode != "RGB":
+                resized = resized.convert("RGB")
+        
+        # Центрируем изображение на холсте
+        paste_x = (target_width - new_width) // 2
+        paste_y = (target_height - new_height) // 2
+        
+        canvas.paste(resized, (paste_x, paste_y))
+        
+        return canvas
 
     def _simple_composite(
         self, subject: Image.Image, background: Image.Image
