@@ -389,12 +389,16 @@ class RenderPipeline:
                                         f"{ai_prompt} "
                                         "Сохрани узнаваемые черты внешности из исходного загруженного фото. "
                                         "Ориентируйся на внешность человека из загруженного изображения. "
-                                        "Сделай человека похожим на фото-референс."
+                                        "Сделай человека похожим на фото-референс. "
+                                        "КРИТИЧНО: Не добавляй дополнительные элементы, дубликаты или новые изображения. "
+                                        "Замени только существующего персонажа, сохранив всю остальную композицию без изменений."
                                     ) if ai_prompt else (
                                         "Improve the image. Ensure perfect color matching, "
                                         "natural shadows, and seamless integration. "
                                         "Preserve recognizable features from the uploaded photo. "
-                                        "The result should be publication-ready."
+                                        "The result should be publication-ready. "
+                                        "CRITICAL: Do not add additional elements, duplicates, or new images. "
+                                        "Replace only the existing character, keeping the rest of the composition unchanged."
                                     )
                                     refined_result = self.refiner.refine_compositing(
                                         composed_image=temp_composite,  # Временный композит для LLM улучшения

@@ -1,0 +1,5 @@
+# Файлы шаблона должны быть в этой директории:
+# - template_config.json (уже есть)
+# - base_clean.png (требуется)
+# - occlusion_mask.png (требуется)
+# - glass_fx.png (опционально)

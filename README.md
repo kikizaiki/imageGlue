@@ -121,3 +121,25 @@ imageGlue/
 ## Лицензия
 
 [Указать лицензию]
+
+
+## Тестирование
+
+python main.py --input woman2.jpg --template korolek_woman --output result_woman2.jpg --debug
+python main.py --input woman3.jpg --template korolek_woman --output result_woman3.jpg --debug
+python main.py --input woman4.jpg --template korolek_woman --output result_woman4.jpg --debug
+python main.py --input woman5.jpg --template korolek_woman --output result_woman5.jpg --debug
+
+python main.py --input man7.jpg --template korolek --output result_man7.jpg --debug
+python main.py --input man1.jpg --template korolek --output result_man1.jpg --debug
+python main.py --input man2.jpg --template korolek --output result_man2.jpg --debug
+python main.py --input man3.jpg --template korolek --output result_man3.jpg --debug
+python main.py --input man4.jpg --template korolek --output result_man4.jpg --debug
+python main.py --input man5.jpg --template korolek --output result_man5.jpg --debug
+python main.py --input man6.jpg --template korolek --output result_man6.jpg --debug
+
+python main.py --input dog1.jpg --template dog_cosmonaut_v1 --output result_dog1.jpg --debug
+python main.py --input dog2.jpg --template dog_cosmonaut_v1 --output result_dog2.jpg --debug
+python main.py --input dog3.jpg --template dog_cosmonaut_v1 --output result_dog3.jpg --debug
+python main.py --input dog4.jpg --template dog_cosmonaut_v1 --output result_dog4.jpg --debug
+python main.py --input dog5.jpg --template dog_cosmonaut_v1 --output result_dog5.jpg --debug
