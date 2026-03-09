@@ -316,6 +316,9 @@ class RenderPipeline:
                                 original_dog_image=image,  # Исходное фото сущности - ОБЯЗАТЕЛЬНО
                                 poster_background=poster_background,  # Чистый постер - ОБЯЗАТЕЛЬНО
                                 ai_prompt=ai_prompt,  # Промпт из конфигурации шаблона
+                                template_config=template_config,  # Передаём config для face_region режима
+                                job_id=job_id,  # Для debug artifacts
+                                debug=debug,  # Режим отладки
                             )
                             
                             # ВСЕГДА используем результат AI если он получен

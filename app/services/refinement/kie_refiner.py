@@ -10,6 +10,8 @@ from PIL import Image
 
 from app.core.config import settings
 from app.core.exceptions import CompositingError
+from app.integrations.kie.client import KIEClient
+from app.integrations.kie.models import KIETaskError, KIEValidationError, UnsupportedModelError
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,38 @@ class KIERefiner:
         self.api_url = settings.KIE_API_URL.rstrip("/")  # Для API (createTask, recordInfo)
         self.upload_base_url = settings.KIE_UPLOAD_BASE_URL.rstrip("/")  # Для File Upload API (отдельная база)
         
+        # Backward compatibility: use KIE_MODEL if KIE_PRIMARY_MODEL not set
+        primary_model = getattr(settings, "KIE_PRIMARY_MODEL", None) or settings.KIE_MODEL
+        fallback_model = getattr(settings, "KIE_FALLBACK_MODEL", None) or None
+        
+        # Log model configuration
+        logger.info(
+            f"🔧 KIERefiner initialization:\n"
+            f"   - settings.KIE_PRIMARY_MODEL: {getattr(settings, 'KIE_PRIMARY_MODEL', 'NOT SET')}\n"
+            f"   - settings.KIE_MODEL (deprecated): {settings.KIE_MODEL}\n"
+            f"   - settings.KIE_FALLBACK_MODEL: {getattr(settings, 'KIE_FALLBACK_MODEL', 'NOT SET')}\n"
+            f"   - Selected primary_model: {primary_model}\n"
+            f"   - Selected fallback_model: {fallback_model or '(not configured)'}"
+        )
+        
+        # Initialize unified KIE client
+        self.client = KIEClient(
+            api_key=self.api_key,
+            api_url=self.api_url,
+            primary_model=primary_model,
+            fallback_model=fallback_model if fallback_model else None,
+        )
+        
+        # Keep model for backward compatibility
+        self.model = primary_model
+        
+        logger.info(
+            f"🔧 KIERefiner client initialized:\n"
+            f"   - self.client.primary_model: {self.client.primary_model}\n"
+            f"   - self.client.fallback_model: {self.client.fallback_model or '(not configured)'}\n"
+            f"   - self.model (backward compat): {self.model}"
+        )
+        
         # File Upload API endpoints (из документации)
         self.STREAM_ENDPOINT = "/api/file-stream-upload"
         self.BASE64_ENDPOINT = "/api/file-base64-upload"
@@ -34,6 +68,9 @@ class KIERefiner:
         else:
             logger.info(f"KIE.ai API initialized: {self.api_url}")
             logger.info(f"KIE.ai Upload Base URL: {self.upload_base_url}")
+            logger.info(f"KIE.ai Primary Model: {primary_model}")
+            if fallback_model:
+                logger.info(f"KIE.ai Fallback Model: {fallback_model}")
 
     def _make_request(
         self, endpoint: str, payload: dict[str, Any], timeout: float = 300.0
@@ -299,9 +336,9 @@ class KIERefiner:
             
             # Правильный формат payload согласно документации KIE.ai
             # input_urls и prompt должны быть внутри объекта input
-            # Модель для image-to-image: gpt-image/1.5-image-to-image
+            # Поддерживаемые модели: gpt-image/1.5-image-to-image, flux-1/kontext-dev
             payload = {
-                "model": "gpt-image/1.5-image-to-image",  # Правильное имя модели для image-to-image
+                "model": self.model,  # Используем модель из настроек
                 "input": {
                     "input_urls": input_urls,
                     "prompt": prompt,
@@ -614,6 +651,9 @@ class KIERefiner:
         original_dog_image: Image.Image | None = None,
         poster_background: Image.Image | None = None,
         ai_prompt: str | None = None,
+        template_config: dict[str, Any] | None = None,
+        job_id: str | None = None,
+        debug: bool = False,
     ) -> Image.Image:
         """
         Integrate dog into poster using AI/LLM.
@@ -673,7 +713,9 @@ class KIERefiner:
         ai_prompt: str,
     ) -> Image.Image:
         """
-        Use AI to integrate entity (dog/human) into poster from scratch using GPT Image 1.5.
+        Use AI to integrate entity (dog/human) into poster from scratch using KIE.ai.
+
+        Uses unified KIEClient with support for multiple models and fallback.
 
         Args:
             dog_image: Original entity photo (dog or human)
@@ -695,65 +737,50 @@ class KIERefiner:
             logger.info(f"Poster background size: {poster_background.size}")
             poster_file_url = self._upload_file(poster_background)
             
-            # Для GPT Image 1.5 можно использовать несколько input_urls
             logger.info("Step 3: Creating integration task with both images...")
             logger.info(f"Image order: [1] poster ({poster_file_url[:50]}...), [2] entity ({entity_file_url[:50]}...)")
             logger.info(f"Prompt length: {len(prompt)} chars")
             
-            # Правильный формат payload согласно документации KIE.ai
-            # input_urls и prompt должны быть внутри объекта input
-            # Модель для image-to-image: gpt-image/1.5-image-to-image
-            # Вычисляем правильный aspect_ratio из исходного постера
+            # Вычисляем правильный aspect_ratio из исходного постера (для GPT Image 1.5)
             poster_width, poster_height = poster_background.size
-            # Упрощаем aspect_ratio до ближайшего стандартного значения
             aspect_ratio_str = self._calculate_aspect_ratio(poster_width, poster_height)
-            
-            # Определяем порядок изображений: постер первым, затем сущность (собака/человек)
-            # ВАЖНО: Первое изображение - постер, второе - загруженное фото сущности
-            payload = {
-                "model": "gpt-image/1.5-image-to-image",  # Правильное имя модели для image-to-image
-                "input": {
-                    "input_urls": [poster_file_url, entity_file_url],  # [0] = постер, [1] = загруженное фото
-                    "prompt": prompt,
-                    "aspect_ratio": aspect_ratio_str,  # Используем aspect_ratio исходного постера
-                    "quality": "high",  # Увеличиваем качество для лучшего сохранения деталей лица
-                },
-            }
-            
             logger.info(f"Using aspect_ratio: {aspect_ratio_str} (from poster size {poster_width}x{poster_height})")
             
-            logger.info(f"Creating task with model: {payload['model']}, {len(payload['input']['input_urls'])} input URL(s)")
-            logger.debug(f"Prompt: {prompt[:100]}...")
+            # Use unified client to create task (handles model selection and fallback)
+            # Log model selection before calling client
+            logger.info(
+                f"🔧 _integrate_dog_into_poster calling create_image_edit_task:\n"
+                f"   - Client primary_model: {self.client.primary_model}\n"
+                f"   - Client fallback_model: {self.client.fallback_model or '(not configured)'}\n"
+                f"   - Model parameter: None (will use primary_model)\n"
+                f"   - Expected model: {self.client.primary_model}"
+            )
             
-            result_data = self._make_request("/api/v1/jobs/createTask", payload, timeout=60.0)
-            
-            # Жёсткая проверка ответа - KIE.ai может вернуть HTTP 200, но с code: 422 внутри JSON
-            code = result_data.get("code")
-            if code != 200:
-                error_msg = result_data.get("msg", "Unknown error")
-                raise CompositingError(f"KIE.ai createTask failed (code {code}): {error_msg}")
-            
-            # Проверяем наличие data и taskId
-            if not result_data.get("data"):
-                raise CompositingError(f"KIE.ai createTask returned no data: {result_data}")
-            
-            data = result_data["data"]
-            
-            # Extract task ID (может быть taskId, task_id, или id)
-            task_id = None
-            if isinstance(data, dict):
-                task_id = data.get("taskId") or data.get("task_id") or data.get("id")
-            elif isinstance(data, str):
-                task_id = data
-            
-            if not task_id:
-                raise CompositingError(f"Task ID not found in response data: {data}")
+            try:
+                task_id = self.client.create_image_edit_task(
+                    model=None,  # Use primary model from config
+                    prompt=prompt,
+                    poster_url=poster_file_url,
+                    reference_url=entity_file_url,
+                    aspect_ratio=aspect_ratio_str,
+                    quality="high",
+                    use_fallback=True,  # Enable fallback if primary fails
+                )
+            except (KIEValidationError, UnsupportedModelError) as e:
+                # Convert to CompositingError for backward compatibility
+                raise CompositingError(f"KIE validation error: {e}") from e
+            except KIETaskError as e:
+                # Convert to CompositingError for backward compatibility
+                raise CompositingError(f"KIE task error: {e}") from e
             
             logger.info(f"✅ Task created successfully, ID: {task_id}")
             
-            # Wait for completion
+            # Wait for completion using unified client
             logger.info("Step 4: Waiting for AI integration to complete...")
-            task_result = self._wait_for_task_completion(task_id, max_wait=300)
+            try:
+                task_result = self.client.wait_for_task_completion(task_id, max_wait=300)
+            except KIETaskError as e:
+                raise CompositingError(f"KIE task completion error: {e}") from e
             
             # Extract and download result
             logger.info("Step 5: Downloading integrated result...")
@@ -794,6 +821,262 @@ class KIERefiner:
             # Вместо этого пробуем улучшить уже скомпозированное изображение
             logger.warning("AI integration failed, will try to improve pre-composited image instead")
             raise CompositingError(f"AI integration failed: {e}") from e
+
+    def _integrate_face_region(
+        self,
+        reference_image: Image.Image,
+        poster_background: Image.Image,
+        ai_prompt: str,
+        template_config: dict[str, Any],
+        job_id: str | None = None,
+        debug: bool = False,
+    ) -> Image.Image:
+        """
+        Integrate face using face_region mode: crop head region from poster, replace face, recompose.
+
+        Args:
+            reference_image: Reference face image
+            poster_background: Full poster background
+            ai_prompt: AI integration prompt (not used in face_region mode)
+            template_config: Template configuration with face_region coordinates
+            job_id: Job ID for debug artifacts
+            debug: Whether to save debug artifacts
+
+        Returns:
+            Final image with replaced face
+        """
+        from app.core.storage import Storage
+        from app.services.detection.dog_detector import DogDetector
+
+        logger.info("🎯 Starting face_region integration mode")
+        
+        # Get face_region coordinates from template config
+        ai_integration_config = template_config.get("ai_integration", {})
+        face_region = ai_integration_config.get("face_region", {})
+        
+        if not face_region:
+            raise CompositingError("face_region coordinates not found in template config")
+        
+        x = int(face_region.get("x", 0))
+        y = int(face_region.get("y", 0))
+        width = int(face_region.get("width", 0))
+        height = int(face_region.get("height", 0))
+        
+        if width <= 0 or height <= 0:
+            raise CompositingError(f"Invalid face_region dimensions: {width}x{height}")
+        
+        logger.info(f"Face region: x={x}, y={y}, w={width}, h={height}")
+        
+        # Initialize storage for debug artifacts
+        storage = None
+        if debug and job_id:
+            storage = Storage(job_id)
+            storage.save_debug(poster_background, "face_region_00_original_poster.png")
+            storage.save_debug(reference_image, "face_region_01_reference_face.png")
+        
+        # Step 1: Crop head region from poster
+        logger.info("Step 1: Cropping head region from poster...")
+        poster_width, poster_height = poster_background.size
+        
+        # Ensure coordinates are within bounds
+        x = max(0, min(x, poster_width))
+        y = max(0, min(y, poster_height))
+        width = min(width, poster_width - x)
+        height = min(height, poster_height - y)
+        
+        head_region_crop = poster_background.crop((x, y, x + width, y + height))
+        logger.info(f"Cropped head region: {head_region_crop.size}")
+        
+        if debug and storage:
+            storage.save_debug(head_region_crop, "face_region_02_head_region_crop.png")
+        
+        # Step 2: Normalize reference face
+        logger.info("Step 2: Normalizing reference face...")
+        normalized_reference = self._normalize_reference_face(reference_image, debug, storage)
+        logger.info(f"Normalized reference: {normalized_reference.size}")
+        
+        # Step 3: Get face replacement prompt
+        face_replacement_prompt = ai_integration_config.get(
+            "face_replacement_prompt",
+            "The first image is a cropped head region from a poster. The second image is a reference face for identity. Replace ONLY the face/head in the first image using the identity from the second image. Do NOT paste the second image as a separate object. Preserve the costume, pose, scale, lighting, and composition of the first image. The result should be a seamless face replacement that looks natural and integrated."
+        )
+        
+        # Step 4: Upload images and create KIE task
+        logger.info("Step 3: Uploading images to KIE.ai...")
+        head_region_url = self._upload_file(head_region_crop)
+        reference_url = self._upload_file(normalized_reference)
+        
+        logger.info("Step 4: Creating face replacement task...")
+        try:
+            task_id = self.client.create_image_edit_task(
+                model=None,  # Use primary model from config
+                prompt=face_replacement_prompt,
+                poster_url=head_region_url,  # Cropped head region
+                reference_url=reference_url,  # Normalized reference face
+                use_fallback=True,
+            )
+        except (KIEValidationError, UnsupportedModelError) as e:
+            raise CompositingError(f"KIE validation error: {e}") from e
+        except KIETaskError as e:
+            raise CompositingError(f"KIE task error: {e}") from e
+        
+        logger.info(f"✅ Task created successfully, ID: {task_id}")
+        
+        # Step 5: Wait for completion
+        logger.info("Step 5: Waiting for face replacement to complete...")
+        try:
+            task_result = self.client.wait_for_task_completion(task_id, max_wait=300)
+        except KIETaskError as e:
+            raise CompositingError(f"KIE task completion error: {e}") from e
+        
+        # Step 6: Download result
+        logger.info("Step 6: Downloading face replacement result...")
+        import json
+        
+        result_json_raw = task_result.get("resultJson")
+        if not result_json_raw:
+            raise CompositingError(f"No resultJson in KIE.ai response: {task_result}")
+        
+        try:
+            result_json = json.loads(result_json_raw)
+        except json.JSONDecodeError as e:
+            raise CompositingError(f"Failed to parse resultJson: {e}")
+        
+        result_urls = result_json.get("resultUrls") or []
+        if not result_urls:
+            raise CompositingError(f"No resultUrls in KIE.ai resultJson: {result_json}")
+        
+        result_url = result_urls[0]
+        edited_head_region = self._download_image_from_url(result_url)
+        logger.info(f"Downloaded edited head region: {edited_head_region.size}")
+        
+        if debug and storage:
+            storage.save_debug(edited_head_region, "face_region_03_edited_head_region.png")
+        
+        # Step 7: Recompose edited head region back into poster
+        logger.info("Step 7: Recomposing edited head region into poster...")
+        final_image = self._recompose_face_region(
+            poster_background,
+            edited_head_region,
+            x, y, width, height,
+        )
+        logger.info(f"✅ Face replacement completed. Final image size: {final_image.size}")
+        
+        if debug and storage:
+            storage.save_debug(final_image, "face_region_04_final_recomposed.png")
+        
+        return final_image
+
+    def _normalize_reference_face(
+        self,
+        reference_image: Image.Image,
+        debug: bool = False,
+        storage: Any = None,
+    ) -> Image.Image:
+        """
+        Normalize reference face: detect face, crop with padding, avoid extreme close-up.
+
+        Args:
+            reference_image: Reference face image
+            debug: Whether to save debug artifacts
+            storage: Storage instance for debug artifacts
+
+        Returns:
+            Normalized face image
+        """
+        from app.services.detection.dog_detector import DogDetector
+        
+        logger.info("Normalizing reference face...")
+        
+        # Detect face/head in reference image
+        detector = DogDetector()
+        try:
+            detection = detector.detect(reference_image, entity_type="human")
+            head_bbox = detection.head_bbox
+            
+            if not head_bbox:
+                logger.warning("No head detected, using entity bbox")
+                head_bbox = detection.dog_bbox
+        except Exception as e:
+            logger.warning(f"Face detection failed: {e}, using center crop")
+            # Fallback: use center crop
+            img_width, img_height = reference_image.size
+            from app.models.schemas import BBox
+            head_bbox = BBox(
+                x1=img_width * 0.2,
+                y1=img_height * 0.1,
+                x2=img_width * 0.8,
+                y2=img_height * 0.6,
+            )
+        
+        # Add padding (30% on each side)
+        padding_ratio = 0.3
+        bbox_width = head_bbox.x2 - head_bbox.x1
+        bbox_height = head_bbox.y2 - head_bbox.y1
+        
+        padding_x = bbox_width * padding_ratio
+        padding_y = bbox_height * padding_ratio
+        
+        crop_x1 = max(0, head_bbox.x1 - padding_x)
+        crop_y1 = max(0, head_bbox.y1 - padding_y)
+        crop_x2 = min(reference_image.width, head_bbox.x2 + padding_x)
+        crop_y2 = min(reference_image.height, head_bbox.y2 + padding_y)
+        
+        # Crop with padding
+        normalized = reference_image.crop((int(crop_x1), int(crop_y1), int(crop_x2), int(crop_y2)))
+        
+        # Ensure minimum size (avoid extreme close-up)
+        min_size = 256
+        if normalized.width < min_size or normalized.height < min_size:
+            # Resize maintaining aspect ratio
+            aspect = normalized.width / normalized.height
+            if normalized.width < min_size:
+                new_width = min_size
+                new_height = int(new_width / aspect)
+            else:
+                new_height = min_size
+                new_width = int(new_height * aspect)
+            normalized = normalized.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        logger.info(f"Normalized reference face: {normalized.size} (from {reference_image.size})")
+        
+        if debug and storage:
+            storage.save_debug(normalized, "face_region_01b_normalized_reference.png")
+        
+        return normalized
+
+    def _recompose_face_region(
+        self,
+        poster: Image.Image,
+        edited_head_region: Image.Image,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> Image.Image:
+        """
+        Recompose edited head region back into poster.
+
+        Args:
+            poster: Original poster
+            edited_head_region: Edited head region from KIE
+            x, y, width, height: Original crop coordinates
+
+        Returns:
+            Recomposed poster with replaced face
+        """
+        # Create a copy of the poster
+        result = poster.copy()
+        
+        # Resize edited head region to match original crop size if needed
+        if edited_head_region.size != (width, height):
+            logger.info(f"Resizing edited head region from {edited_head_region.size} to ({width}, {height})")
+            edited_head_region = edited_head_region.resize((width, height), Image.Resampling.LANCZOS)
+        
+        # Paste edited head region back into poster
+        result.paste(edited_head_region, (x, y))
+        
+        return result
 
     def refine_segmentation(
         self,
@@ -875,7 +1158,7 @@ class KIERefiner:
             logger.warning("KIE API key not configured, skipping refinement")
             return image
 
-        logger.info(f"Starting KIE.ai refinement (GPT Image 1.5) with prompt: {prompt[:100]}...")
+        logger.info(f"Starting KIE.ai refinement (model: {self.model}) with prompt: {prompt[:100]}...")
         logger.info(f"API URL: {self.api_url}, Key present: {bool(self.api_key)}")
 
         try:
@@ -883,13 +1166,33 @@ class KIERefiner:
             logger.info("Step 1: Uploading image to KIE.ai...")
             file_url = self._upload_file(image)
             
-            # Step 2: Create task
+            # Step 2: Create task using unified client
             logger.info("Step 2: Creating image editing task...")
-            task_id = self._create_task(file_url, prompt)
+            logger.info(
+                f"🔧 _refine_with_prompt calling create_image_edit_task:\n"
+                f"   - Client primary_model: {self.client.primary_model}\n"
+                f"   - Client fallback_model: {self.client.fallback_model or '(not configured)'}\n"
+                f"   - Model parameter: None (will use primary_model)\n"
+                f"   - Expected model: {self.client.primary_model}"
+            )
+            try:
+                task_id = self.client.create_image_edit_task(
+                    model=None,  # Use primary model from config
+                    prompt=prompt,
+                    poster_url=file_url,  # Single image refinement
+                    reference_url=None,
+                    use_fallback=True,
+                )
+            except (KIEValidationError, UnsupportedModelError, KIETaskError) as e:
+                # Convert to CompositingError for backward compatibility
+                raise CompositingError(f"KIE task creation error: {e}") from e
             
-            # Step 3: Wait for completion
+            # Step 3: Wait for completion using unified client
             logger.info("Step 3: Waiting for task completion...")
-            task_result = self._wait_for_task_completion(task_id, max_wait=300)
+            try:
+                task_result = self.client.wait_for_task_completion(task_id, max_wait=300)
+            except KIETaskError as e:
+                raise CompositingError(f"KIE task completion error: {e}") from e
             
             # Step 4: Extract result URL and download
             logger.info("Step 4: Downloading result...")

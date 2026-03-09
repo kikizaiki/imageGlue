@@ -51,6 +51,14 @@
     "second_pass": false
   },
   "ai_integration": {
-    "prompt": "Первое изображение — базовый постер. Второе изображение — референс внешности персонажа. Замени персонажа на постере на персонажа, визуально соответствующего второму изображению. Сохрани общую композицию, позу, освещение и стиль постера. Сделай аккуратную естественную интеграцию без артефактов и видимых швов. КРИТИЧНО: Не добавляй дополнительные элементы, дубликаты или новые изображения. Замени только существующего персонажа на постере, сохранив всю остальную композицию без изменений."
+    "refinement_mode": "face_region",
+    "face_region": {
+      "x": 500,
+      "y": 200,
+      "width": 400,
+      "height": 500
+    },
+    "prompt": "Первое изображение — базовый постер. Второе изображение — референс внешности персонажа. Замени персонажа на постере на персонажа, визуально соответствующего второму изображению. Сохрани общую композицию, позу, освещение и стиль постера. Сделай аккуратную естественную интеграцию без артефактов и видимых швов. КРИТИЧНО: Не добавляй дополнительные элементы, дубликаты или новые изображения. Замени только существующего персонажа на постере, сохранив всю остальную композицию без изменений.",
+    "face_replacement_prompt": "The first image is a cropped head region from a poster. The second image is a reference face for identity. Replace ONLY the face/head in the first image using the identity from the second image. Do NOT paste the second image as a separate object. Preserve the costume, pose, scale, lighting, and composition of the first image. The result should be a seamless face replacement that looks natural and integrated."
   }
 }

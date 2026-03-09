@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     KIE_API_KEY: str = ""
     KIE_API_URL: str = "https://api.kie.ai"  # Base URL для API (createTask, getTaskStatus, etc.)
     KIE_UPLOAD_BASE_URL: str = "https://kieai.redpandaai.co"  # Base URL для File Upload API (отдельная база)
+    KIE_PRIMARY_MODEL: str = "gpt-image/1.5-image-to-image"  # Primary model: "gpt-image/1.5-image-to-image" or "google/nano-banana-edit"
+    KIE_FALLBACK_MODEL: str = ""  # Fallback model if primary fails (empty = no fallback)
+    KIE_MODEL: str = "gpt-image/1.5-image-to-image"  # DEPRECATED: Use KIE_PRIMARY_MODEL instead. Kept for backward compatibility.
     REFINEMENT_ENABLED: bool = True
     REFINEMENT_THRESHOLD: float = 0.6  # Порог качества для запуска refinement
     REFINEMENT_TIMEOUT: int = 120  # Timeout for AI requests in seconds

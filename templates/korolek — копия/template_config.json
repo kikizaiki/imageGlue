@@ -1,0 +1,56 @@
+{
+  "template_id": "korolek",
+  "entity_type": "human",
+  "canvas": {
+    "width": 1400,
+    "height": 2000
+  },
+  "assets": {
+    "base_clean": "base_clean.png",
+    "occlusion_mask": "occlusion_mask.png",
+    "glass_fx": "glass_fx.png"
+  },
+  "placement": {
+    "insert_zone": {
+      "x": 0,
+      "y": 0,
+      "width": 1400,
+      "height": 2000
+    },
+    "fit_mode": "contain",
+    "padding": {
+      "left": 0.05,
+      "right": 0.05,
+      "top": 0.05,
+      "bottom": 0.05
+    },
+    "crop_expansion": {
+      "left": 0.15,
+      "right": 0.15,
+      "top": 0.15,
+      "bottom": 0.40
+    },
+    "allow_ears_outside_mask": false,
+    "vertical_bias": 0.0,
+    "horizontal_bias": 0.0,
+    "scale_multiplier": 1.0,
+    "min_scale": 0.5,
+    "max_scale": 2.0
+  },
+  "postprocess": {
+    "edge_feather": 2,
+    "light_wrap": 0.12,
+    "glass_tint": 0.08,
+    "grain_match": false,
+    "color_match": true
+  },
+  "refinement": {
+    "enabled": true,
+    "improve_segmentation": true,
+    "improve_placement": false,
+    "second_pass": false
+  },
+  "ai_integration": {
+    "prompt": "Первое изображение — базовый постер. Второе изображение — референс внешности персонажа. Замени персонажа на постере на персонажа, визуально соответствующего второму изображению. Сохрани общую композицию, позу, освещение и стиль постера. Сделай аккуратную естественную интеграцию без артефактов и видимых швов. КРИТИЧНО: Не добавляй дополнительные элементы, дубликаты или новые изображения. Замени только существующего персонажа на постере, сохранив всю остальную композицию без изменений."
+  }
+}
