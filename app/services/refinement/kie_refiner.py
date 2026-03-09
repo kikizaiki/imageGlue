@@ -10,7 +10,6 @@ from PIL import Image
 
 from app.core.config import settings
 from app.core.exceptions import CompositingError
-from app.services.refinement.llm_prompter import LLMPrompter
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +23,6 @@ class KIERefiner:
         # Убеждаемся что базовый URL без trailing slash
         self.api_url = settings.KIE_API_URL.rstrip("/")  # Для API (createTask, recordInfo)
         self.upload_base_url = settings.KIE_UPLOAD_BASE_URL.rstrip("/")  # Для File Upload API (отдельная база)
-        self.prompter = LLMPrompter()
         
         # File Upload API endpoints (из документации)
         self.STREAM_ENDPOINT = "/api/file-stream-upload"
@@ -563,30 +561,6 @@ class KIERefiner:
         """
         try:
             payload = {"url": file_url}
-            result_data = self._make_request("/api/v1/common/download-url", payload, timeout=60.0)
-            
-            if "data" in result_data:
-                return result_data["data"]
-            elif "url" in result_data:
-                return result_data["url"]
-            else:
-                raise CompositingError(f"Unexpected download URL response format: {result_data}")
-        except Exception as e:
-            logger.error(f"Failed to get download URL: {e}")
-            raise CompositingError(f"Failed to get download URL: {e}") from e
-
-    def _get_download_url(self, file_url: str) -> str:
-        """
-        Get temporary download link for generated file from KIE.ai.
-
-        Args:
-            file_url: URL returned by KIE.ai API
-
-        Returns:
-            Temporary download URL
-        """
-        try:
-            payload = {"url": file_url}
             result_data = self._make_request("/api/v1/common/download-url", payload)
             
             if "data" in result_data:
@@ -994,162 +968,6 @@ class KIERefiner:
         
         return closest_ratio
 
-    def _get_background_color(self, image: Image.Image) -> tuple[int, int, int]:
-        """
-        Get dominant background color from image corners.
-        
-        Args:
-            image: Image to analyze
-            
-        Returns:
-            RGB tuple representing background color
-        """
-        # Берем пиксели из углов изображения
-        width, height = image.size
-        corner_size = min(50, width // 10, height // 10)  # Размер области для анализа
-        
-        corners = [
-            (0, 0),  # Верхний левый
-            (width - corner_size, 0),  # Верхний правый
-            (0, height - corner_size),  # Нижний левый
-            (width - corner_size, height - corner_size),  # Нижний правый
-        ]
-        
-        colors = []
-        rgb_image = image.convert("RGB")
-        
-        for x, y in corners:
-            # Берем небольшую область из угла
-            box = (x, y, min(x + corner_size, width), min(y + corner_size, height))
-            corner_region = rgb_image.crop(box)
-            
-            # Получаем средний цвет области
-            pixels = list(corner_region.getdata())
-            if pixels:
-                avg_r = sum(p[0] for p in pixels) // len(pixels)
-                avg_g = sum(p[1] for p in pixels) // len(pixels)
-                avg_b = sum(p[2] for p in pixels) // len(pixels)
-                colors.append((avg_r, avg_g, avg_b))
-        
-        if not colors:
-            return (255, 255, 255)  # Fallback на белый
-        
-        # Возвращаем средний цвет из всех углов
-        avg_r = sum(c[0] for c in colors) // len(colors)
-        avg_g = sum(c[1] for c in colors) // len(colors)
-        avg_b = sum(c[2] for c in colors) // len(colors)
-        
-        return (avg_r, avg_g, avg_b)
-
-    def _crop_to_size(
-        self,
-        image: Image.Image,
-        target_width: int,
-        target_height: int,
-    ) -> Image.Image:
-        """
-        Crop image center to target size without changing aspect ratio.
-        
-        If image is smaller than target, it will be resized to fit (maintaining aspect ratio)
-        and then cropped. If image is larger, it will be cropped from center.
-        
-        Args:
-            image: Image to crop
-            target_width: Target width
-            target_height: Target height
-            
-        Returns:
-            Cropped/resized image with target dimensions
-        """
-        original_width, original_height = image.size
-        
-        # Если изображение меньше целевого размера - увеличиваем с сохранением пропорций
-        if original_width < target_width or original_height < target_height:
-            # Вычисляем масштаб для подгонки по большей стороне
-            scale_w = target_width / original_width
-            scale_h = target_height / original_height
-            scale = max(scale_w, scale_h)  # Используем больший масштаб
-            
-            new_width = int(original_width * scale)
-            new_height = int(original_height * scale)
-            
-            # Увеличиваем изображение
-            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            original_width, original_height = new_width, new_height
-        
-        # Обрезаем центр изображения до нужного размера
-        left = (original_width - target_width) // 2
-        top = (original_height - target_height) // 2
-        right = left + target_width
-        bottom = top + target_height
-        
-        # Обрезаем
-        cropped = image.crop((left, top, right, bottom))
-        
-        return cropped
-
-    def _resize_with_aspect_ratio(
-        self,
-        image: Image.Image,
-        target_width: int,
-        target_height: int,
-        background_color: tuple[int, int, int] = (255, 255, 255),
-    ) -> Image.Image:
-        """
-        Resize image to target size while preserving aspect ratio.
-        
-        If aspect ratios don't match, the image will be resized to fit within
-        the target dimensions and centered on a canvas of the target size.
-        
-        Args:
-            image: Image to resize
-            target_width: Target width
-            target_height: Target height
-            background_color: Background color for padding (RGB tuple)
-            
-        Returns:
-            Resized image with target dimensions
-        """
-        original_width, original_height = image.size
-        original_ratio = original_width / original_height
-        target_ratio = target_width / target_height
-        
-        # Вычисляем размеры с сохранением пропорций
-        if original_ratio > target_ratio:
-            # Изображение шире - подгоняем по ширине
-            new_width = target_width
-            new_height = int(target_width / original_ratio)
-        else:
-            # Изображение выше - подгоняем по высоте
-            new_height = target_height
-            new_width = int(target_height * original_ratio)
-        
-        # Изменяем размер изображения с сохранением пропорций
-        resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        
-        # Создаём холст нужного размера с фоном
-        if image.mode == "RGBA":
-            # Для RGBA используем прозрачный фон или конвертируем в RGB
-            canvas = Image.new("RGB", (target_width, target_height), background_color)
-            # Конвертируем RGBA в RGB для вставки
-            if resized.mode == "RGBA":
-                # Создаём временный RGB для вставки
-                rgb_resized = Image.new("RGB", resized.size, background_color)
-                rgb_resized.paste(resized, mask=resized.split()[3])
-                resized = rgb_resized
-        else:
-            canvas = Image.new("RGB", (target_width, target_height), background_color)
-            if resized.mode != "RGB":
-                resized = resized.convert("RGB")
-        
-        # Центрируем изображение на холсте
-        paste_x = (target_width - new_width) // 2
-        paste_y = (target_height - new_height) // 2
-        
-        canvas.paste(resized, (paste_x, paste_y))
-        
-        return canvas
-
     def _simple_composite(
         self, subject: Image.Image, background: Image.Image
     ) -> Image.Image:
@@ -1181,41 +999,3 @@ class KIERefiner:
             return result_rgb
         
         return result.convert("RGB")
-
-    def refine(
-        self,
-        image: Image.Image,
-        prompt: str | None = None,
-        refinement_type: str = "compositing",
-    ) -> Image.Image:
-        """
-        Refine image using KIE.ai API.
-
-        Args:
-            image: Image to refine
-            prompt: Custom prompt (optional)
-            refinement_type: Type of refinement (compositing, segmentation, placement)
-
-        Returns:
-            Refined image
-        """
-        if not self.api_key:
-            logger.warning("KIE API key not configured, skipping refinement")
-            return image
-
-        if prompt is None:
-            if refinement_type == "compositing":
-                prompt = (
-                    "Improve the image compositing quality. Make all elements blend seamlessly. "
-                    "Fix visible edges, improve lighting matching, ensure natural integration. "
-                    "The result should look like a single cohesive professional image."
-                )
-            elif refinement_type == "segmentation":
-                prompt = (
-                    "Improve background removal. Clean edges, remove artifacts, "
-                    "smooth alpha transitions for professional compositing."
-                )
-            else:
-                prompt = "Improve image quality and integration."
-
-        return self._refine_with_prompt(image, prompt)
