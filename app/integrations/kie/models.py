@@ -8,6 +8,9 @@ class KIEModel(str, enum.Enum):
 
     GPT_IMAGE_15_I2I = "gpt-image/1.5-image-to-image"
     NANO_BANANA_EDIT = "google/nano-banana-edit"
+    FLUX_KONTEXT_PRO = "flux-kontext-pro"
+    QWEN_IMAGE_EDIT = "qwen/image-edit"
+    SEEDREAM_4_5_EDIT = "seedream/4-5-edit"
 
     @classmethod
     def from_string(cls, model_name: str) -> "KIEModel":

@@ -161,6 +161,201 @@ def build_kie_payload_for_nano_banana_edit(
     return payload
 
 
+def build_kie_payload_for_flux_kontext(
+    prompt: str,
+    poster_url: str | None = None,
+    reference_url: str | None = None,
+    output_format: str = "png",
+) -> dict[str, Any]:
+    """
+    Build payload for Flux Kontext Pro model.
+
+    Note: Flux Kontext may use a different endpoint structure.
+    This is a placeholder - adjust based on actual KIE.ai documentation.
+
+    Args:
+        prompt: Editing prompt
+        poster_url: URL of poster/background image (REQUIRED)
+        reference_url: URL of reference image (REQUIRED)
+        output_format: Output format ("png", "jpg", etc.)
+
+    Returns:
+        Payload dictionary for createTask endpoint
+
+    Raises:
+        KIEValidationError: If validation fails
+    """
+    # Validate prompt
+    if not prompt or not prompt.strip():
+        raise KIEValidationError(
+            "Prompt is required for Flux Kontext Pro",
+            model=KIEModel.FLUX_KONTEXT_PRO.value,
+        )
+
+    # Validate required URLs
+    if not poster_url:
+        raise KIEValidationError(
+            "poster_url is required for Flux Kontext Pro",
+            model=KIEModel.FLUX_KONTEXT_PRO.value,
+            missing_field="poster_url",
+        )
+
+    if not reference_url:
+        raise KIEValidationError(
+            "reference_url is required for Flux Kontext Pro",
+            model=KIEModel.FLUX_KONTEXT_PRO.value,
+            missing_field="reference_url",
+        )
+
+    # Build input object (similar to nano-banana, but may differ)
+    input_obj: dict[str, Any] = {
+        "prompt": prompt.strip(),
+        "image_urls": [poster_url, reference_url],
+        "output_format": output_format,
+    }
+
+    payload = {
+        "model": KIEModel.FLUX_KONTEXT_PRO.value,
+        "input": input_obj,
+    }
+
+    logger.debug(
+        f"Built Flux Kontext Pro payload: model={payload['model']}, "
+        f"input_keys={list(input_obj.keys())}, "
+        f"image_urls_count={len(input_obj['image_urls'])}"
+    )
+
+    return payload
+
+
+def build_kie_payload_for_qwen_image_edit(
+    prompt: str,
+    poster_url: str | None = None,
+    reference_url: str | None = None,
+    output_format: str = "png",
+) -> dict[str, Any]:
+    """
+    Build payload for Qwen Image Edit model.
+
+    Args:
+        prompt: Editing prompt
+        poster_url: URL of poster/background image (REQUIRED)
+        reference_url: URL of reference image (REQUIRED)
+        output_format: Output format ("png", "jpg", etc.)
+
+    Returns:
+        Payload dictionary for createTask endpoint
+
+    Raises:
+        KIEValidationError: If validation fails
+    """
+    # Validate prompt
+    if not prompt or not prompt.strip():
+        raise KIEValidationError(
+            "Prompt is required for Qwen Image Edit",
+            model=KIEModel.QWEN_IMAGE_EDIT.value,
+        )
+
+    # Validate required URLs
+    if not poster_url:
+        raise KIEValidationError(
+            "poster_url is required for Qwen Image Edit",
+            model=KIEModel.QWEN_IMAGE_EDIT.value,
+            missing_field="poster_url",
+        )
+
+    if not reference_url:
+        raise KIEValidationError(
+            "reference_url is required for Qwen Image Edit",
+            model=KIEModel.QWEN_IMAGE_EDIT.value,
+            missing_field="reference_url",
+        )
+
+    # Build input object
+    input_obj: dict[str, Any] = {
+        "prompt": prompt.strip(),
+        "image_urls": [poster_url, reference_url],
+        "output_format": output_format,
+    }
+
+    payload = {
+        "model": KIEModel.QWEN_IMAGE_EDIT.value,
+        "input": input_obj,
+    }
+
+    logger.debug(
+        f"Built Qwen Image Edit payload: model={payload['model']}, "
+        f"input_keys={list(input_obj.keys())}, "
+        f"image_urls_count={len(input_obj['image_urls'])}"
+    )
+
+    return payload
+
+
+def build_kie_payload_for_seedream_edit(
+    prompt: str,
+    poster_url: str | None = None,
+    reference_url: str | None = None,
+    output_format: str = "png",
+) -> dict[str, Any]:
+    """
+    Build payload for Seedream 4-5 Edit model.
+
+    Args:
+        prompt: Editing prompt
+        poster_url: URL of poster/background image (REQUIRED)
+        reference_url: URL of reference image (REQUIRED)
+        output_format: Output format ("png", "jpg", etc.)
+
+    Returns:
+        Payload dictionary for createTask endpoint
+
+    Raises:
+        KIEValidationError: If validation fails
+    """
+    # Validate prompt
+    if not prompt or not prompt.strip():
+        raise KIEValidationError(
+            "Prompt is required for Seedream 4-5 Edit",
+            model=KIEModel.SEEDREAM_4_5_EDIT.value,
+        )
+
+    # Validate required URLs
+    if not poster_url:
+        raise KIEValidationError(
+            "poster_url is required for Seedream 4-5 Edit",
+            model=KIEModel.SEEDREAM_4_5_EDIT.value,
+            missing_field="poster_url",
+        )
+
+    if not reference_url:
+        raise KIEValidationError(
+            "reference_url is required for Seedream 4-5 Edit",
+            model=KIEModel.SEEDREAM_4_5_EDIT.value,
+            missing_field="reference_url",
+        )
+
+    # Build input object
+    input_obj: dict[str, Any] = {
+        "prompt": prompt.strip(),
+        "image_urls": [poster_url, reference_url],
+        "output_format": output_format,
+    }
+
+    payload = {
+        "model": KIEModel.SEEDREAM_4_5_EDIT.value,
+        "input": input_obj,
+    }
+
+    logger.debug(
+        f"Built Seedream 4-5 Edit payload: model={payload['model']}, "
+        f"input_keys={list(input_obj.keys())}, "
+        f"image_urls_count={len(input_obj['image_urls'])}"
+    )
+
+    return payload
+
+
 def build_kie_payload(
     model: str,
     prompt: str,
@@ -239,6 +434,48 @@ def build_kie_payload(
             f"   - Input keys: {list(payload.get('input', {}).keys())}\n"
             f"   - Has input_urls: {'input_urls' in payload.get('input', {})}\n"
             f"   - Has image_urls: {'image_urls' in payload.get('input', {})}"
+        )
+        return payload
+    elif kie_model == KIEModel.FLUX_KONTEXT_PRO:
+        logger.info(f"🔧 Routing to Flux Kontext Pro builder")
+        payload = build_kie_payload_for_flux_kontext(
+            prompt=prompt,
+            poster_url=poster_url,
+            reference_url=reference_url,
+            output_format=output_format,
+        )
+        logger.info(
+            f"🔧 Flux Kontext Pro payload built:\n"
+            f"   - Payload model: {payload.get('model')}\n"
+            f"   - Input keys: {list(payload.get('input', {}).keys())}"
+        )
+        return payload
+    elif kie_model == KIEModel.QWEN_IMAGE_EDIT:
+        logger.info(f"🔧 Routing to Qwen Image Edit builder")
+        payload = build_kie_payload_for_qwen_image_edit(
+            prompt=prompt,
+            poster_url=poster_url,
+            reference_url=reference_url,
+            output_format=output_format,
+        )
+        logger.info(
+            f"🔧 Qwen Image Edit payload built:\n"
+            f"   - Payload model: {payload.get('model')}\n"
+            f"   - Input keys: {list(payload.get('input', {}).keys())}"
+        )
+        return payload
+    elif kie_model == KIEModel.SEEDREAM_4_5_EDIT:
+        logger.info(f"🔧 Routing to Seedream 4-5 Edit builder")
+        payload = build_kie_payload_for_seedream_edit(
+            prompt=prompt,
+            poster_url=poster_url,
+            reference_url=reference_url,
+            output_format=output_format,
+        )
+        logger.info(
+            f"🔧 Seedream 4-5 Edit payload built:\n"
+            f"   - Payload model: {payload.get('model')}\n"
+            f"   - Input keys: {list(payload.get('input', {}).keys())}"
         )
         return payload
     else:

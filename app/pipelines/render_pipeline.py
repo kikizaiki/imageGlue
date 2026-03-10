@@ -302,29 +302,209 @@ class RenderPipeline:
                         logger.info(f"Job {job_id}: Using AI to integrate {entity_name} into {template_desc}")
                         logger.debug(f"Job {job_id}: AI prompt: {ai_prompt[:100]}...")
                         
+                        # Initialize routing metadata (must be before any routing logic)
+                        routing_metadata = {
+                            "entity_type": entity_type,
+                            "teen_flow_enabled": settings.TEEN_FLOW_ENABLED,
+                            "subject_age_class": None,
+                            "selected_strategy": None,
+                            "refiner_class_used": None,
+                            "ai_refinement_applied": False,
+                            "selected_provider": None,
+                        }
+                        
                         try:
-                            # ВСЁ ДЕЛАЕМ ЧЕРЕЗ LLM - полная AI интеграция с исходным фото и постером
-                            # БЕЗ старого композитинга - сразу отправляем в LLM
-                            logger.info(f"Job {job_id}: 🎨 Starting LLM-based integration (NO old compositing)")
-                            logger.info(f"Job {job_id}: 📤 Sending original dog image + poster to LLM for smart integration")
-                            logger.info(f"Job {job_id}: 🚫 Old compositing SKIPPED - everything through LLM")
+                            # Age-based routing for human entities
+                            if entity_type == "human" and settings.TEEN_FLOW_ENABLED:
+                                logger.info(f"Job {job_id}: 🔍 Age-based routing enabled for human entity")
+                                
+                                from app.services.age_routing import AgeRouter, SubjectAgeClass
+                                from app.services.refinement.strategy_router import StrategyRouter, RefinementStrategy
+                                
+                                # Classify reference subject age
+                                age_router = AgeRouter(classifier_type=settings.REFERENCE_SUBJECT_CLASSIFIER)
+                                subject_age_class = age_router.classify_reference_subject(image)
+                                routing_metadata["subject_age_class"] = subject_age_class.value
+                                logger.info(
+                                    f"Job {job_id}: 📊 Subject age classification: {subject_age_class.value}"
+                                )
+                                
+                                # Select refinement strategy
+                                strategy_router = StrategyRouter(unknown_policy=settings.TEEN_UNKNOWN_POLICY)
+                                strategy = strategy_router.select_refinement_strategy(
+                                    subject_age_class, config=template_config
+                                )
+                                routing_metadata["selected_strategy"] = strategy.value
+                                logger.info(
+                                    f"Job {job_id}: 🎯 Selected refinement strategy: {strategy.value}"
+                                )
+                                
+                                # Route to appropriate refiner
+                                # CRITICAL GUARD: Only call TeenRefiner for explicit TEEN_OR_MINOR
+                                if strategy == RefinementStrategy.TEEN_KIE_STYLIZED:
+                                    # Additional safety check
+                                    if subject_age_class != SubjectAgeClass.TEEN_OR_MINOR:
+                                        logger.warning(
+                                            f"Job {job_id}: ⚠️  WARNING: Teen flow selected but subject_age_class={subject_age_class.value}. "
+                                            f"This should only happen with explicit policy override. Proceeding with caution."
+                                        )
+                                    
+                                    logger.info(
+                                        f"Job {job_id}: 🎨 Starting TEEN flow:\n"
+                                        f"   - Subject age class: {subject_age_class.value}\n"
+                                        f"   - Strategy: {strategy.value}\n"
+                                        f"   - Refiner class: TeenRefiner\n"
+                                        f"   - Mode: face_region with stylized prompts"
+                                    )
+                                    from app.services.refinement.teen_refiner import TeenRefiner
+                                    teen_refiner = TeenRefiner()
+                                    refined_result = teen_refiner.refine_face_region(
+                                        reference_image=image,
+                                        poster_background=poster_background,
+                                        template_config=template_config,
+                                        job_id=job_id,
+                                        debug=debug,
+                                    )
+                                    routing_metadata["refiner_class_used"] = "TeenRefiner"
+                                    routing_metadata["selected_provider"] = "KIE.ai (alternative teen models)"
+                                    routing_metadata["ai_refinement_applied"] = True
+                                    
+                                    logger.info(
+                                        f"Job {job_id}: ✅ Teen flow completed.\n"
+                                        f"   - Subject: {subject_age_class.value}\n"
+                                        f"   - Strategy: {strategy.value}\n"
+                                        f"   - Refiner: TeenRefiner\n"
+                                        f"   - Provider: KIE.ai (alternative teen models)"
+                                    )
+                                else:
+                                    # Adult flow - USE OLD WORKING AI REFINER
+                                    # ADULT and UNKNOWN should use the old adult AI refiner (KIERefiner)
+                                    logger.info(
+                                        f"Job {job_id}: 🎨 Starting ADULT flow:\n"
+                                        f"   - Subject age class: {subject_age_class.value}\n"
+                                        f"   - Strategy: {strategy.value}\n"
+                                        f"   - Refiner class: KIERefiner (old adult AI path)\n"
+                                        f"   - Mode: realistic integration via KIE.ai"
+                                    )
+                                    
+                                    # Guard: Never use adult flow for TEEN_OR_MINOR
+                                    if subject_age_class == SubjectAgeClass.TEEN_OR_MINOR:
+                                        raise CompositingError(
+                                            f"CRITICAL: Adult flow should never be called for TEEN_OR_MINOR. "
+                                            f"subject_age_class={subject_age_class.value}"
+                                        )
+                                    
+                                    # For adult/unknown: use old working AI refiner (KIERefiner)
+                                    # This is the original adult path that was working before age routing
+                                    logger.info(
+                                        f"Job {job_id}: Using old adult AI refiner (KIERefiner) for {subject_age_class.value}"
+                                    )
+                                    
+                                    refined_result = self.refiner.refine_compositing(
+                                        composed_image=None,
+                                        template_description=template_desc,
+                                        detected_issues=[],
+                                        original_dog_image=image,
+                                        poster_background=poster_background,
+                                        ai_prompt=ai_prompt,
+                                        template_config=template_config,
+                                        job_id=job_id,
+                                        debug=debug,
+                                    )
+                                    
+                                    routing_metadata["refiner_class_used"] = "KIERefiner"
+                                    routing_metadata["selected_provider"] = f"KIE.ai (OpenAI model: {self.refiner.client.primary_model})"
+                                    routing_metadata["ai_refinement_applied"] = True
+                                    
+                                    logger.info(
+                                        f"Job {job_id}: ✅ Adult flow completed (AI refinement applied).\n"
+                                        f"   - Subject: {subject_age_class.value}\n"
+                                        f"   - Strategy: {strategy.value}\n"
+                                        f"   - Refiner: KIERefiner\n"
+                                        f"   - Provider: KIE.ai (OpenAI model: {self.refiner.client.primary_model})\n"
+                                        f"   - AI refinement: applied"
+                                    )
+                            else:
+                                # Non-human or teen flow disabled - use existing flow
+                                routing_metadata["refiner_class_used"] = "KIERefiner"
+                                routing_metadata["selected_provider"] = "KIE.ai (OpenAI model)"
+                                
+                                logger.info(
+                                    f"Job {job_id}: 🎨 Starting LLM-based integration:\n"
+                                    f"   - Entity type: {entity_type}\n"
+                                    f"   - TEEN_FLOW_ENABLED: {settings.TEEN_FLOW_ENABLED}\n"
+                                    f"   - Routing: Direct KIERefiner (no age routing)\n"
+                                    f"   - Refiner class: KIERefiner\n"
+                                    f"   - Provider: KIE.ai (OpenAI model: {self.refiner.client.primary_model})\n"
+                                    f"   - Mode: full LLM integration (NO old compositing)"
+                                )
+                                logger.info(f"Job {job_id}: 📤 Sending original image + poster to LLM for smart integration")
+                                
+                                refined_result = self.refiner.refine_compositing(
+                                    composed_image=None,  # Нет старого композитинга - только LLM
+                                    template_description=template_desc,
+                                    detected_issues=[],
+                                    original_dog_image=image,  # Исходное фото сущности - ОБЯЗАТЕЛЬНО
+                                    poster_background=poster_background,  # Чистый постер - ОБЯЗАТЕЛЬНО
+                                    ai_prompt=ai_prompt,  # Промпт из конфигурации шаблона
+                                    template_config=template_config,  # Передаём config для face_region режима
+                                    job_id=job_id,  # Для debug artifacts
+                                    debug=debug,  # Режим отладки
+                                )
                             
-                            refined_result = self.refiner.refine_compositing(
-                                composed_image=None,  # Нет старого композитинга - только LLM
-                                template_description=template_desc,
-                                detected_issues=[],
-                                original_dog_image=image,  # Исходное фото сущности - ОБЯЗАТЕЛЬНО
-                                poster_background=poster_background,  # Чистый постер - ОБЯЗАТЕЛЬНО
-                                ai_prompt=ai_prompt,  # Промпт из конфигурации шаблона
-                                template_config=template_config,  # Передаём config для face_region режима
-                                job_id=job_id,  # Для debug artifacts
-                                debug=debug,  # Режим отладки
-                            )
+                            # Используем результат AI если он получен
+                            # Проверяем, был ли это реальный AI refinement
+                            ai_refinement_applied = routing_metadata.get("ai_refinement_applied", False)
+                            refiner_class_used = routing_metadata.get("refiner_class_used")
                             
-                            # ВСЕГДА используем результат AI если он получен
                             if refined_result is not None:
                                 final_image = refined_result
-                                logger.info(f"Job {job_id}: ✅✅✅ LLM integration successful - USING AI RESULT")
+                                
+                                # Если refiner_class не был установлен (non-human path), проверяем результат
+                                if not refiner_class_used:
+                                    # Проверяем, был ли это реальный AI refinement
+                                    # Если refined_result == poster_background (simple copy), то AI не применялся
+                                    if refined_result.size == poster_background.size:
+                                        import numpy as np
+                                        result_array = np.array(refined_result.convert("RGB"))
+                                        poster_array = np.array(poster_background.convert("RGB"))
+                                        if np.array_equal(result_array, poster_array):
+                                            # Это simple copy, AI не применялся
+                                            ai_refinement_applied = False
+                                            refiner_class_used = "NONE"
+                                            routing_metadata["ai_refinement_applied"] = False
+                                            routing_metadata["refiner_class_used"] = "NONE"
+                                            logger.warning(
+                                                f"Job {job_id}: ⚠️  Refined result is identical to original poster. "
+                                                f"AI refinement was NOT applied (refiner_class=NONE)"
+                                            )
+                                        else:
+                                            # Изображения отличаются, AI был применён
+                                            ai_refinement_applied = True
+                                            refiner_class_used = "KIERefiner"
+                                            routing_metadata["ai_refinement_applied"] = True
+                                            routing_metadata["refiner_class_used"] = "KIERefiner"
+                                    else:
+                                        # Размеры отличаются, вероятно AI был применён
+                                        ai_refinement_applied = True
+                                        refiner_class_used = "KIERefiner"
+                                        routing_metadata["ai_refinement_applied"] = True
+                                        routing_metadata["refiner_class_used"] = "KIERefiner"
+                                
+                                # Логируем результат в зависимости от того, был ли применён AI
+                                if ai_refinement_applied:
+                                    logger.info(
+                                        f"Job {job_id}: ✅✅✅ LLM integration successful - USING VALIDATED AI RESULT"
+                                    )
+                                    logger.info(
+                                        f"Job {job_id}: ✅ AI result validation: PASSED (accepted_ai_result=true)"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"Job {job_id}: ⚠️  Result accepted but AI refinement was NOT applied "
+                                        f"(accepted_ai_result=false, refiner_class={refiner_class_used})"
+                                    )
+                                
                                 logger.info(f"Job {job_id}: ✅ Final image size: {final_image.size}")
                             else:
                                 logger.error(f"Job {job_id}: ❌ AI returned None result")
@@ -424,17 +604,36 @@ class RenderPipeline:
                         if final_image is None:
                             raise CompositingError("No final image generated - LLM integration failed")
                         
-                        logger.info(f"Job {job_id}: ✅✅✅ FINAL RESULT: Using LLM-generated image (NO old compositing)")
+                        # Add routing metadata to metadata dict
+                        if "refinement" not in metadata:
+                            metadata["refinement"] = {}
+                        metadata["refinement"].update(routing_metadata)
                         
-                        # Метаданные для AI результата
-                        metadata["refinement"] = {
-                            "applied": True,
-                            "passes": 1,
-                            "type": "llm_integration",
-                            "method": "full_llm_integration",
-                            "old_compositing": False,
-                        }
-                        logger.info(f"Job {job_id}: ✅ Dog integrated successfully using LLM (no old compositing)")
+                        # Log final result based on whether AI was actually applied
+                        ai_refinement_applied = routing_metadata.get("ai_refinement_applied", False)
+                        refiner_class_used = routing_metadata.get("refiner_class_used", "NONE")
+                        
+                        if ai_refinement_applied:
+                            logger.info(f"Job {job_id}: ✅✅✅ FINAL RESULT: Using LLM-generated image (NO old compositing)")
+                            metadata["refinement"].update({
+                                "applied": True,
+                                "passes": 1,
+                                "type": "llm_integration",
+                                "method": "full_llm_integration",
+                                "old_compositing": False,
+                            })
+                            logger.info(f"Job {job_id}: ✅ Entity integrated successfully using LLM (no old compositing)")
+                        else:
+                            logger.warning(
+                                f"Job {job_id}: ⚠️  FINAL RESULT: Using simple compositing "
+                                f"(AI refinement was NOT applied, refiner_class={refiner_class_used})"
+                            )
+                            metadata["refinement"].update({
+                                "applied": False,
+                                "reason": "no_ai_refinement",
+                                "refiner_class": refiner_class_used,
+                                "type": "simple_compositing",
+                            })
 
                         # Применяем occlusion_mask и glass_fx поверх результата от KIE.ai
                         final_image = self._apply_post_ai_layers(

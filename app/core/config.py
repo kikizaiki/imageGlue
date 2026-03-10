@@ -56,6 +56,18 @@ class Settings(BaseSettings):
     MIN_HEAD_SIZE_RATIO: float = 0.02  # Минимальный размер головы относительно кадра
     MAX_BLUR_THRESHOLD: float = 100.0  # Порог размытия (Laplacian variance)
 
+    # Age-based routing
+    REFERENCE_SUBJECT_CLASSIFIER: str = "local"  # "local" or "external"
+    TEEN_UNKNOWN_POLICY: str = "route_to_adult"  # "route_to_teen" or "route_to_adult" (default: route_to_adult for safety)
+
+    # Teen flow configuration
+    TEEN_FLOW_ENABLED: bool = True
+    TEEN_FLOW_DEFAULT_MODE: str = "face_region"  # "face_region" only for teens
+    TEEN_FLOW_MODELS: str = (
+        "flux-kontext-pro,qwen/image-edit,seedream/4-5-edit,google/nano-banana-edit"
+    )  # Comma-separated list
+    SAVE_TEEN_DEBUG_ARTIFACTS: bool = True
+
     def __init__(self, **kwargs):
         """Initialize settings and create directories."""
         super().__init__(**kwargs)

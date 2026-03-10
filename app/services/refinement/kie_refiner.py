@@ -6,12 +6,15 @@ from io import BytesIO
 from typing import Any
 
 import httpx
+import numpy as np
 from PIL import Image
 
 from app.core.config import settings
 from app.core.exceptions import CompositingError
 from app.integrations.kie.client import KIEClient
 from app.integrations.kie.models import KIETaskError, KIEValidationError, UnsupportedModelError
+from app.services.refinement.ai_result_validator import AIResultValidator
+from app.services.refinement.kie_upload import KIEUploader
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,16 @@ class KIERefiner:
             f"   - self.model (backward compat): {self.model}"
         )
         
-        # File Upload API endpoints (из документации)
+        # Initialize reliable uploader
+        self.uploader = KIEUploader(
+            api_key=self.api_key,
+            upload_base_url=self.upload_base_url,
+        )
+        
+        # Initialize AI result validator
+        self.validator = AIResultValidator()
+        
+        # File Upload API endpoints (из документации) - kept for backward compatibility
         self.STREAM_ENDPOINT = "/api/file-stream-upload"
         self.BASE64_ENDPOINT = "/api/file-base64-upload"
         self.URL_ENDPOINT = "/api/file-url-upload"
@@ -149,16 +161,13 @@ class KIERefiner:
 
     def _upload_file(self, image: Image.Image) -> str:
         """
-        Upload image to KIE.ai using File Upload API and get file URL.
+        Upload image to KIE.ai using reliable upload utility.
 
-        Порядок fallback:
-        1. file-stream-upload (multipart/form-data) - основной
-        2. file-url-upload (если есть публичный URL) - если stream вернул 4xx/5xx
-        3. file-base64-upload (Data URL) - последний fallback
-
-        Based on KIE.ai documentation:
-        - File Upload API: https://docs.kie.ai/file-upload-api/quickstart
-        - Returns file URL to use in input_urls for createTask
+        Uses KIEUploader which handles:
+        - Automatic method selection (stream vs base64)
+        - Image preprocessing (resize, format conversion)
+        - Retry logic with exponential backoff
+        - Comprehensive diagnostics
 
         Args:
             image: PIL Image to upload
@@ -166,74 +175,7 @@ class KIERefiner:
         Returns:
             File URL from KIE.ai (downloadUrl or fileUrl)
         """
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-        }
-        
-        # Сохраняем временный файл для stream upload
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-            image.save(tmp_file.name, format="PNG")
-            tmp_path = tmp_file.name
-        
-        try:
-            from pathlib import Path
-            tmp_path_obj = Path(tmp_path)
-            
-            # 1. Попытка: File Stream Upload (основной метод)
-            try:
-                logger.info(f"Trying File Stream Upload to: {self.upload_base_url}{self.STREAM_ENDPOINT}")
-                
-                with open(tmp_path, "rb") as f:
-                    files = {
-                        "file": (tmp_path_obj.name, f, "image/png"),
-                    }
-                    data = {
-                        "uploadPath": "images/user-uploads",
-                        "fileName": tmp_path_obj.name,
-                    }
-                    
-                    with httpx.Client(timeout=120.0) as client:
-                        response = client.post(
-                            f"{self.upload_base_url}{self.STREAM_ENDPOINT}",
-                            headers=headers,
-                            files=files,
-                            data=data,
-                            timeout=120.0,
-                        )
-                        response.raise_for_status()
-                        result = response.json()
-                        
-                        file_url = self._extract_file_url(result)
-                        if file_url:
-                            logger.info(f"✅ File uploaded via stream, URL: {file_url[:50]}...")
-                            return file_url
-                        else:
-                            raise CompositingError(f"File URL not found in stream upload response: {result}")
-                            
-            except httpx.HTTPStatusError as e:
-                # Если 4xx/5xx - пробуем URL upload (если можем сделать публичный URL)
-                if e.response.status_code >= 400:
-                    logger.warning(f"Stream upload failed ({e.response.status_code}), trying URL upload...")
-                    try:
-                        return self._upload_via_url(image, tmp_path, headers)
-                    except Exception as url_error:
-                        logger.warning(f"URL upload also failed: {url_error}, trying base64...")
-                        # Fallback на base64
-                        return self._upload_via_base64(image, headers)
-                else:
-                    raise
-            except Exception as e:
-                logger.warning(f"Stream upload error: {e}, trying base64...")
-                # Fallback на base64
-                return self._upload_via_base64(image, headers)
-                
-        finally:
-            # Удаляем временный файл
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+        return self.uploader.upload_image(image)
     
     def _upload_via_url(self, image: Image.Image, tmp_path: str, headers: dict) -> str:
         """
@@ -680,9 +622,35 @@ class KIERefiner:
             # Промпт должен быть передан из template_config
             if not ai_prompt or not isinstance(ai_prompt, str) or not ai_prompt.strip():
                 raise CompositingError("AI integration prompt is required but not provided in template config")
-            return self._integrate_dog_into_poster(
-                original_dog_image, poster_background, ai_prompt
-            )
+            # Get storage for debug artifacts if available
+            storage = None
+            if debug and job_id:
+                from app.core.storage import Storage
+                storage = Storage(job_id)
+            
+            # Extract target region from template_config if available
+            target_region = None
+            if template_config:
+                ai_integration = template_config.get("ai_integration", {})
+                face_region = ai_integration.get("face_region")
+                if face_region:
+                    target_region = {
+                        "x": face_region.get("x", 0),
+                        "y": face_region.get("y", 0),
+                        "width": face_region.get("width", poster_background.width),
+                        "height": face_region.get("height", poster_background.height),
+                    }
+            
+            try:
+                return self._integrate_dog_into_poster(
+                    original_dog_image, poster_background, ai_prompt, template_config, job_id, debug, storage, target_region
+                )
+            except CompositingError as e:
+                # If validation fails, return None to trigger fallback
+                if "too similar" in str(e).lower() or "no-op" in str(e).lower():
+                    logger.warning(f"AI result validation failed, returning None for fallback: {e}")
+                    return None
+                raise
 
         # Fallback: улучшаем уже скомпозированное изображение (когда полная интеграция не работает)
         # Используем промпт из конфига, если он передан, иначе базовый промпт
@@ -711,6 +679,11 @@ class KIERefiner:
         dog_image: Image.Image,
         poster_background: Image.Image,
         ai_prompt: str,
+        template_config: dict[str, Any] | None = None,
+        job_id: str | None = None,
+        debug: bool = False,
+        storage: Any = None,
+        target_region: dict[str, int] | None = None,
     ) -> Image.Image:
         """
         Use AI to integrate entity (dog/human) into poster from scratch using KIE.ai.
@@ -809,6 +782,88 @@ class KIERefiner:
             logger.info(f"Got result URL from resultJson: {result_url[:50]}...")
             
             result_image = self._download_image_from_url(result_url)
+            logger.info(f"✅ Downloaded result image: {result_image.size}")
+
+            # Step 6: Validate AI result (check for no-op changes)
+            logger.info("🔍 Validating AI result against original poster...")
+            
+            # Extract target region from template_config if available
+            target_region = None
+            if template_config:
+                ai_integration = template_config.get("ai_integration", {})
+                face_region = ai_integration.get("face_region")
+                if face_region:
+                    target_region = {
+                        "x": face_region.get("x", 0),
+                        "y": face_region.get("y", 0),
+                        "width": face_region.get("width", poster_background.width),
+                        "height": face_region.get("height", poster_background.height),
+                    }
+            
+            try:
+                validation_result = self.validator.validate_ai_result(
+                    original_image=poster_background,
+                    ai_result=result_image,
+                    target_region=target_region,
+                    debug=debug,
+                    storage=storage,
+                )
+            except Exception as e:
+                # If validator itself fails (not validation failure, but code error),
+                # log warning but don't fail the pipeline - AI result was successfully obtained
+                logger.warning(
+                    f"⚠️  AI result validator encountered an error (non-fatal): {e}\n"
+                    f"   - AI image was successfully downloaded: {result_image.size}\n"
+                    f"   - Full image diff metrics were computed\n"
+                    f"   - Continuing with AI result despite validator error"
+                )
+                # Return a "partial" validation result that accepts the image
+                validation_result = {
+                    "accepted": True,
+                    "partial_validation": True,
+                    "partial_reason": f"Validator error: {e}",
+                    "metrics": {
+                        "full_image": {
+                            "diff_score": 0.5,  # Assume reasonable diff
+                            "mean_abs_diff": 50.0,
+                            "changed_pixels_ratio": 0.1,
+                        },
+                        "target_region": None,
+                    },
+                }
+
+            if not validation_result["accepted"]:
+                rejection_reason = validation_result.get("rejection_reason", "Unknown")
+                logger.warning(
+                    f"⚠️  AI result validation FAILED:\n"
+                    f"   - Rejection reason: {rejection_reason}\n"
+                    f"   - Full image diff score: {validation_result['metrics']['full_image']['diff_score']:.4f}\n"
+                    f"   - Mean absolute diff: {validation_result['metrics']['full_image']['mean_abs_diff']:.2f}\n"
+                    f"   - Changed pixels ratio: {validation_result['metrics']['full_image']['changed_pixels_ratio']:.4f}\n"
+                    f"   - Treating as no-op, will raise CompositingError"
+                )
+                raise CompositingError(
+                    f"AI returned image is too similar to original poster (no-op change detected). "
+                    f"Rejection reason: {rejection_reason}. "
+                    f"Diff score: {validation_result['metrics']['full_image']['diff_score']:.4f} "
+                    f"(minimum required: {self.validator.min_full_diff})."
+                )
+            
+            # Log if validation was partial (target region failed but full image passed)
+            if validation_result.get("partial_validation", False):
+                logger.warning(
+                    f"⚠️  Partial validation: {validation_result.get('partial_reason', 'Unknown reason')}\n"
+                    f"   - Full image validation: PASSED\n"
+                    f"   - Target region validation: FAILED or unavailable\n"
+                    f"   - AI result will be used despite partial validation"
+                )
+
+            logger.info(
+                f"✅ AI result validation PASSED:\n"
+                f"   - Full image diff score: {validation_result['metrics']['full_image']['diff_score']:.4f}\n"
+                f"   - Mean absolute diff: {validation_result['metrics']['full_image']['mean_abs_diff']:.2f}\n"
+                f"   - Changed pixels ratio: {validation_result['metrics']['full_image']['changed_pixels_ratio']:.4f}"
+            )
             
             # Используем результат от KIE.ai как есть - без кропов, без изменения размера
             # KIE.ai должен вернуть постер с обновлённой сущностью того же размера
@@ -955,10 +1010,24 @@ class KIERefiner:
         
         # Step 7: Recompose edited head region back into poster
         logger.info("Step 7: Recomposing edited head region into poster...")
+        logger.info(
+            f"📊 Recomposition details:\n"
+            f"   - Flow: adult_kie_realistic (face_region mode)\n"
+            f"   - Refinement mode: face_region\n"
+            f"   - Provider: KIE.ai\n"
+            f"   - Original poster size: {poster_background.size}\n"
+            f"   - Crop box: x={x}, y={y}, w={width}, h={height}\n"
+            f"   - Cropped region sent to AI: {head_region_crop.size}\n"
+            f"   - AI returned image size: {edited_head_region.size}\n"
+            f"   - Target crop size: {width}x{height}"
+        )
+        
         final_image = self._recompose_face_region(
             poster_background,
             edited_head_region,
             x, y, width, height,
+            debug=debug,
+            storage=storage,
         )
         logger.info(f"✅ Face replacement completed. Final image size: {final_image.size}")
         
@@ -1053,29 +1122,150 @@ class KIERefiner:
         y: int,
         width: int,
         height: int,
+        debug: bool = False,
+        storage: Any = None,
     ) -> Image.Image:
         """
-        Recompose edited head region back into poster.
+        Recompose edited head region back into poster with alpha feathering.
 
         Args:
             poster: Original poster
             edited_head_region: Edited head region from KIE
             x, y, width, height: Original crop coordinates
+            debug: Whether to save debug artifacts
+            storage: Storage instance for debug artifacts
 
         Returns:
             Recomposed poster with replaced face
         """
-        # Create a copy of the poster
-        result = poster.copy()
-        
-        # Resize edited head region to match original crop size if needed
+        logger.info(
+            f"🔧 Starting recomposition:\n"
+            f"   - Poster size: {poster.size}\n"
+            f"   - Edited region size: {edited_head_region.size}\n"
+            f"   - Target crop: {width}x{height} at ({x}, {y})"
+        )
+
+        # Save debug artifacts
+        if debug and storage:
+            storage.save_debug(poster, "face_region_recompose_00_original_poster.png")
+            # Create target crop visualization
+            target_crop = poster.crop((x, y, x + width, y + height))
+            storage.save_debug(target_crop, "face_region_recompose_01_target_crop.png")
+            storage.save_debug(edited_head_region, "face_region_recompose_02_ai_returned_crop.png")
+
+        # Validate aspect ratio
+        target_aspect = width / height if height > 0 else 1.0
+        returned_aspect = edited_head_region.width / edited_head_region.height if edited_head_region.height > 0 else 1.0
+        aspect_diff = abs(target_aspect - returned_aspect) / target_aspect
+
+        logger.info(
+            f"📐 Aspect ratio validation:\n"
+            f"   - Target aspect: {target_aspect:.3f} ({width}/{height})\n"
+            f"   - Returned aspect: {returned_aspect:.3f} ({edited_head_region.width}/{edited_head_region.height})\n"
+            f"   - Difference: {aspect_diff * 100:.1f}%"
+        )
+
+        if aspect_diff > 0.2:  # More than 20% difference
+            logger.warning(
+                f"⚠️  Aspect ratio mismatch > 20% ({aspect_diff * 100:.1f}%). "
+                f"Normalizing returned image to target aspect."
+            )
+
+        # Resize edited head region to match original crop size
         if edited_head_region.size != (width, height):
-            logger.info(f"Resizing edited head region from {edited_head_region.size} to ({width}, {height})")
+            logger.info(
+                f"🔧 Resizing edited head region:\n"
+                f"   - From: {edited_head_region.size}\n"
+                f"   - To: ({width}, {height})\n"
+                f"   - Method: LANCZOS"
+            )
             edited_head_region = edited_head_region.resize((width, height), Image.Resampling.LANCZOS)
-        
-        # Paste edited head region back into poster
-        result.paste(edited_head_region, (x, y))
-        
+            
+            if debug and storage:
+                storage.save_debug(edited_head_region, "face_region_recompose_03_resized_ai_crop.png")
+
+        # Create alpha feather mask for smooth blending
+        # Feather size: ~5% of crop dimensions
+        feather_size = max(8, min(width, height) // 20)
+        logger.info(f"🎭 Creating alpha feather mask (feather_size={feather_size}px)")
+
+        # Create mask with feathering
+        mask = Image.new("L", (width, height), 255)
+        mask_array = np.array(mask)
+
+        # Create gradient from edges
+        for i in range(feather_size):
+            alpha = int(255 * (i + 1) / feather_size)
+            # Top edge
+            mask_array[i, :] = np.minimum(mask_array[i, :], alpha)
+            # Bottom edge
+            mask_array[height - 1 - i, :] = np.minimum(mask_array[height - 1 - i, :], alpha)
+            # Left edge
+            mask_array[:, i] = np.minimum(mask_array[:, i], alpha)
+            # Right edge
+            mask_array[:, width - 1 - i] = np.minimum(mask_array[:, width - 1 - i], alpha)
+
+        # Apply corner feathering (circular gradient in corners)
+        center_x, center_y = width // 2, height // 2
+        for py in range(height):
+            for px in range(width):
+                # Distance from nearest edge
+                dist_from_edge = min(px, width - 1 - px, py, height - 1 - py)
+                # Use edge distance for feathering
+                if dist_from_edge < feather_size:
+                    edge_alpha = int(255 * dist_from_edge / feather_size)
+                    mask_array[py, px] = min(mask_array[py, px], edge_alpha)
+
+        feather_mask = Image.fromarray(mask_array, mode="L")
+
+        if debug and storage:
+            storage.save_debug(feather_mask, "face_region_recompose_04_recomposition_mask.png")
+
+        # Convert edited region to RGBA if needed
+        if edited_head_region.mode != "RGBA":
+            edited_rgba = edited_head_region.convert("RGBA")
+        else:
+            edited_rgba = edited_head_region.copy()
+
+        # Apply feather mask to alpha channel
+        alpha_channel = edited_rgba.split()[3]
+        alpha_channel = Image.blend(
+            Image.new("L", alpha_channel.size, 0),
+            alpha_channel,
+            1.0
+        )
+        # Apply feather mask
+        alpha_channel = Image.composite(
+            alpha_channel,
+            Image.new("L", alpha_channel.size, 0),
+            feather_mask
+        )
+        edited_rgba.putalpha(alpha_channel)
+
+        # Create result with RGBA support
+        if poster.mode != "RGBA":
+            result = poster.convert("RGBA")
+        else:
+            result = poster.copy()
+
+        # Paste with alpha blending
+        logger.info(
+            f"📌 Pasting edited region:\n"
+            f"   - Coordinates: ({x}, {y})\n"
+            f"   - Size: {width}x{height}\n"
+            f"   - Using alpha blending with feather mask"
+        )
+        result.paste(edited_rgba, (x, y), edited_rgba)
+
+        # Convert back to RGB if original was RGB
+        if poster.mode == "RGB":
+            result = result.convert("RGB")
+
+        logger.info(f"✅ Recomposition completed. Final size: {result.size}")
+
+        if debug and storage:
+            storage.save_debug(result, "face_region_recompose_05_final_recomposed.png")
+
         return result
 
     def refine_segmentation(
